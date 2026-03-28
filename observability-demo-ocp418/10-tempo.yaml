@@ -1,0 +1,23 @@
+apiVersion: tempo.grafana.com/v1alpha1
+kind: TempoMonolithic
+metadata:
+  name: demo
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/name: tempo
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  managementState: Managed
+  storage:
+    traces:
+      backend: memory
+      size: 2Gi
+  jaegerui:
+    enabled: true
+    route:
+      enabled: true
+  extraConfig:
+    tempo:
+      compactor:
+        compaction:
+          block_retention: 24h

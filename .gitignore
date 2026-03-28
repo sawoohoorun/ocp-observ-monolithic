@@ -1,0 +1,7 @@
+# Maven
+observability-demo-ocp418/spring-monolith/target/
+
+# IDE / OS
+.idea/
+*.iml
+.DS_Store
