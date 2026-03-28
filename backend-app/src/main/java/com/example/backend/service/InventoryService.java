@@ -24,34 +24,24 @@ public class InventoryService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> checkInventory(String sku) {
-    Span business =
+    Span db =
         tracer
-            .spanBuilder("backend: calculate inventory")
-            .setSpanKind(SpanKind.INTERNAL)
+            .spanBuilder("db: select inventory")
+            .setSpanKind(SpanKind.CLIENT)
+            .setAttribute("db.system", "postgresql")
+            .setAttribute("db.operation", "SELECT")
+            .setAttribute("db.sql.table", "inventory")
+            .setAttribute("db.statement", "SELECT * FROM inventory WHERE sku = ?")
             .startSpan();
-    try (Scope scope = business.makeCurrent()) {
-      business.setAttribute("inventory.sku", sku);
-
-      Span db =
-          tracer
-              .spanBuilder("postgres: SELECT inventory")
-              .setSpanKind(SpanKind.CLIENT)
-              .setAttribute("db.system", "postgresql")
-              .setAttribute("db.operation", "SELECT")
-              .setAttribute("db.sql.table", "inventory")
-              .setAttribute("db.statement", "SELECT * FROM inventory WHERE sku = ?")
-              .startSpan();
-      try (Scope dbScope = db.makeCurrent()) {
-        Optional<InventoryEntity> row = inventoryRepository.findById(sku);
-        return row.map(
-            i ->
-                Map.<String, Object>of(
-                    "sku", i.getSku(), "qty", i.getQty(), "warehouse", i.getWarehouse()));
-      } finally {
-        db.end();
-      }
+    try (Scope dbScope = db.makeCurrent()) {
+      db.setAttribute("inventory.sku", sku);
+      Optional<InventoryEntity> row = inventoryRepository.findById(sku);
+      return row.map(
+          i ->
+              Map.<String, Object>of(
+                  "sku", i.getSku(), "qty", i.getQty(), "warehouse", i.getWarehouse()));
     } finally {
-      business.end();
+      db.end();
     }
   }
 }

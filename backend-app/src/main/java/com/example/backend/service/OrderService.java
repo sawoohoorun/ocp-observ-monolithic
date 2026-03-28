@@ -24,36 +24,29 @@ public class OrderService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> getOrder(String id) {
-    Span business =
-        tracer.spanBuilder("backend: load order").setSpanKind(SpanKind.INTERNAL).startSpan();
-    try (Scope scope = business.makeCurrent()) {
-      business.setAttribute("order.id", id);
-
-      Span db =
-          tracer
-              .spanBuilder("postgres: SELECT orders")
-              .setSpanKind(SpanKind.CLIENT)
-              .setAttribute("db.system", "postgresql")
-              .setAttribute("db.operation", "SELECT")
-              .setAttribute("db.sql.table", "orders")
-              .setAttribute("db.statement", "SELECT * FROM orders WHERE id = ?")
-              .startSpan();
-      try (Scope dbScope = db.makeCurrent()) {
-        Optional<OrderEntity> row = orderRepository.findById(id);
-        return row.map(
-            o ->
-                Map.<String, Object>of(
-                    "orderId",
-                    o.getId(),
-                    "customer",
-                    o.getCustomer(),
-                    "amountCents",
-                    o.getAmountCents()));
-      } finally {
-        db.end();
-      }
+    Span db =
+        tracer
+            .spanBuilder("db: select orders")
+            .setSpanKind(SpanKind.CLIENT)
+            .setAttribute("db.system", "postgresql")
+            .setAttribute("db.operation", "SELECT")
+            .setAttribute("db.sql.table", "orders")
+            .setAttribute("db.statement", "SELECT * FROM orders WHERE id = ?")
+            .startSpan();
+    try (Scope dbScope = db.makeCurrent()) {
+      db.setAttribute("order.id", id);
+      Optional<OrderEntity> row = orderRepository.findById(id);
+      return row.map(
+          o ->
+              Map.<String, Object>of(
+                  "orderId",
+                  o.getId(),
+                  "customer",
+                  o.getCustomer(),
+                  "amountCents",
+                  o.getAmountCents()));
     } finally {
-      business.end();
+      db.end();
     }
   }
 }

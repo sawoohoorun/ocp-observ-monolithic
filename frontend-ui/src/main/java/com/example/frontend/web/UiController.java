@@ -46,7 +46,7 @@ public class UiController {
     model.addAttribute("action", actionLabel);
     Span prepare =
         tracer
-            .spanBuilder("frontend: prepare request")
+            .spanBuilder("step: prepare request")
             .setSpanKind(SpanKind.INTERNAL)
             .startSpan();
     try (Scope prepareScope = prepare.makeCurrent()) {

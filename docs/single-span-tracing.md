@@ -2,11 +2,25 @@
 
 This branch treats **frontend-ui** and **backend-app** as **one logical application** in Jaeger:
 
-- **Same trace ID** end-to-end for one UI action (unchanged contract).
+- **Same trace ID** end-to-end for one UI action.
 - **Same OpenTelemetry `service.name`:** `order-demo-app` on both pods.
-- **Span model** (Get Order example): root **SERVER** `app: user click get order` → **INTERNAL** `frontend: prepare request` → **CLIENT** HTTP to API → **SERVER** `GET /api/orders/...` → **INTERNAL** `backend: load order` → **CLIENT** `postgres: SELECT orders`.
+- **Same root operation** per user action: the UI **SERVER** span uses **`app: get order`**, **`app: check inventory`**, or **`app: calculate price`** (not separate “frontend” vs “backend” top-level operation names).
 
-Inventory and pricing actions use `app: user click check inventory` / `app: user click calculate price` and matching backend INTERNAL names.
+## Span model (Get Order)
+
+Conceptual waterfall:
+
+```text
+SERVER    app: get order
+  INTERNAL  step: prepare request
+  CLIENT    HTTP GET /api/orders/...   (RestClient; name may follow Micrometer defaults)
+  SERVER    step: process order
+  CLIENT    db: select orders
+```
+
+Inventory and pricing follow the same pattern: root **`app: check inventory`** / **`app: calculate price`**, then **`step: prepare request`**, API **SERVER** **`step: check inventory`** / **`step: calculate price`**, and **CLIENT** **`db: select inventory`** / **`db: select pricing`**.
+
+Backend inbound HTTP contextual names come from **`ApiServerObservationConfig`** (`ServerRequestObservationConvention`). UI roots come from **`UiServerObservationConfig`**.
 
 ## Namespace
 
@@ -31,4 +45,4 @@ No extra env vars are required; `application.yaml` uses in-namespace DNS (`*.obs
 
 1. Open the UI route in **`observability-single-span`** → **Get Order** once.
 2. Jaeger route in the **same** project → **Service** = **`order-demo-app`**.
-3. Open one trace → confirm **one trace ID** and the span hierarchy described above.
+3. Open one trace → confirm **one trace ID**, root **SERVER** **`app: get order`**, and children **`step: prepare request`**, **`step: process order`**, **`db: select orders`** (plus any Micrometer-named HTTP client span).

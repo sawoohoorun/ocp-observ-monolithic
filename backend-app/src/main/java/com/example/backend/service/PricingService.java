@@ -24,31 +24,21 @@ public class PricingService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> getPrice(String sku) {
-    Span business =
+    Span db =
         tracer
-            .spanBuilder("backend: calculate price")
-            .setSpanKind(SpanKind.INTERNAL)
+            .spanBuilder("db: select pricing")
+            .setSpanKind(SpanKind.CLIENT)
+            .setAttribute("db.system", "postgresql")
+            .setAttribute("db.operation", "SELECT")
+            .setAttribute("db.sql.table", "pricing")
+            .setAttribute("db.statement", "SELECT * FROM pricing WHERE sku = ?")
             .startSpan();
-    try (Scope scope = business.makeCurrent()) {
-      business.setAttribute("pricing.sku", sku);
-
-      Span db =
-          tracer
-              .spanBuilder("postgres: SELECT pricing")
-              .setSpanKind(SpanKind.CLIENT)
-              .setAttribute("db.system", "postgresql")
-              .setAttribute("db.operation", "SELECT")
-              .setAttribute("db.sql.table", "pricing")
-              .setAttribute("db.statement", "SELECT * FROM pricing WHERE sku = ?")
-              .startSpan();
-      try (Scope dbScope = db.makeCurrent()) {
-        Optional<PricingEntity> row = pricingRepository.findById(sku);
-        return row.map(p -> Map.<String, Object>of("sku", p.getSku(), "priceCents", p.getCents()));
-      } finally {
-        db.end();
-      }
+    try (Scope dbScope = db.makeCurrent()) {
+      db.setAttribute("pricing.sku", sku);
+      Optional<PricingEntity> row = pricingRepository.findById(sku);
+      return row.map(p -> Map.<String, Object>of("sku", p.getSku(), "priceCents", p.getCents()));
     } finally {
-      business.end();
+      db.end();
     }
   }
 }

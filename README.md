@@ -74,9 +74,9 @@ flowchart LR
 
 ## Cross-Service Trace Propagation
 
-1. **Browser → UI Deployment:** vanilla HTTP GET; Tomcat/Spring creates the **root SERVER** span (named e.g. **`app: user click get order`**) with **`service.name` `order-demo-app`**.
-2. **UI → API:** **`RestClient`** injects **`traceparent`**; backend Tomcat creates a **child SERVER** span for `/api/...` (same trace id, same **`order-demo-app`** process in Jaeger).
-3. **Backend internal:** **INTERNAL** business spans and **CLIENT** **`postgres: SELECT …`** attach under the API HTTP span.
+1. **Browser → UI Deployment:** vanilla HTTP GET; Tomcat/Spring creates the **root SERVER** span (named e.g. **`app: get order`**) with **`service.name` `order-demo-app`**.
+2. **UI → API:** **`RestClient`** injects **`traceparent`**; backend Tomcat creates a **child SERVER** span for `/api/...` (contextual name **`step: process order`** / **`step: check inventory`** / **`step: calculate price`**; same trace id, same **`order-demo-app`** in Jaeger).
+3. **Backend:** **CLIENT** **`db: select …`** spans attach under the API **SERVER** span (no extra INTERNAL “backend:” wrapper).
 4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces`**.
 
 **Correlation contract:** One user action MUST yield **one trace ID**. On branch **`single-span`**, both workloads export **`service.name` = `order-demo-app`** so Jaeger shows **one logical application** in the service list. Full span naming and verification: **`docs/single-span-tracing.md`**.
@@ -87,9 +87,9 @@ flowchart LR
 
 **Tracing:** **`frontend-ui`** and **`backend-app`** `application.yaml` set **`spring.application.name: order-demo-app`** and **`management.opentelemetry.resource-attributes.service.name: order-demo-app`**. The browser hits the **UI Deployment**; **`RestClient`** calls the **backend Service**; W3C context continues the trace.
 
-**Inbound UI (SERVER):** `UiServerObservationConvention` sets contextual names **`app: user click get order`**, **`app: user click check inventory`**, **`app: user click calculate price`** (per route).
+**Inbound UI (SERVER):** `UiServerObservationConvention` sets contextual names **`app: get order`**, **`app: check inventory`**, **`app: calculate price`** (per route).
 
-**Manual spans:** **`frontend: prepare request`** (**INTERNAL**) wraps the backend HTTP call. Backend services use **INTERNAL** **`backend: load order`** / **`backend: calculate inventory`** / **`backend: calculate price`** and **CLIENT** **`postgres: SELECT …`** with **`db.*`** attributes.
+**Manual spans:** **`step: prepare request`** (**INTERNAL**) wraps the backend HTTP call. **`ApiServerObservationConfig`** names API **SERVER** spans **`step: process order`** / **`step: check inventory`** / **`step: calculate price`**. Services emit **CLIENT** **`db: select orders`** / **`db: select inventory`** / **`db: select pricing`** with **`db.*`** attributes.
 
 **Implementation requirement:** Preserve **W3C Trace Context** on the **frontend → backend** hop (**`traceparent`** on **`RestClient`**).
 
@@ -113,7 +113,7 @@ See **Troubleshooting — distributed trace correlation** in the main table: mis
 
 ## Database Span Visibility in Jaeger
 
-- **Approach:** **Manual OpenTelemetry spans** (`SpanKind.CLIENT`) named **`postgres: SELECT orders`**, **`postgres: SELECT inventory`**, **`postgres: SELECT pricing`**, with attributes **`db.system=postgresql`**, **`db.statement`**, **`db.sql.table`**.
+- **Approach:** **Manual OpenTelemetry spans** (`SpanKind.CLIENT`) named **`db: select orders`**, **`db: select inventory`**, **`db: select pricing`**, with attributes **`db.system=postgresql`**, **`db.statement`**, **`db.sql.table`**.
 - **Why manual:** Guarantees a **visible SQL-layer span** in Jaeger for lab validation. Pure JPA/Micrometer JDBC auto-instrumentation varies by version; if those spans appear **in addition**, they are a bonus.
 - **Missing DB spans:** If you see backend HTTP + service spans but **no** `SELECT *` client spans, check **`OrderService`** / **`InventoryService`** / **`PricingService`** in `backend-app` or verify the deployment is running the expected image.
 
@@ -160,8 +160,8 @@ The previous single **`spring-monolith`** tree was **removed** in favor of this 
 |------|--------|-----|
 | **Layout** | Replaced single `spring-monolith` with **`frontend-ui/`** + **`backend-app/`** | Separate deployments and routes; **`single-span`** uses one OTLP **`service.name`**. |
 | **Manifests** | Moved to **`openshift/`** with numbered files (`20`–`40`) | Matches OpenShift-focused layout you requested. |
-| **Backend** | JPA + Postgres + **INTERNAL** / **CLIENT** span names per **`docs/single-span-tracing.md`** | One logical app waterfall in Jaeger. |
-| **Frontend** | Thymeleaf + **`RestClient`** + **`UiServerObservationConvention`** | **W3C** propagation + **SERVER** **`app: user click …`** roots. |
+| **Backend** | JPA + Postgres + **`ApiServerObservationConfig`** + **CLIENT** **`db: select …`** per **`docs/single-span-tracing.md`** | One logical app waterfall in Jaeger. |
+| **Frontend** | Thymeleaf + **`RestClient`** + **`UiServerObservationConvention`** | **W3C** propagation + **SERVER** **`app: …`** roots (shared operation naming with the flow). |
 | **Postgres** | New `40-postgres.yaml` | Ephemeral DB with seed data; **no PVC**. |
 
 ---
@@ -303,16 +303,15 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 ### 1. Frontend UI tracing (server-side)
 
-- **Inbound HTTP:** Spring MVC / Tomcat creates a **SERVER** span per `/action/...`; contextual name from **`UiServerObservationConvention`** (**`app: user click …`**). **`service.name`** = **`order-demo-app`**.
-- **Manual UI spans:** **`UiController`** adds **INTERNAL** **`frontend: prepare request`** around **`RestClient`**.
+- **Inbound HTTP:** Spring MVC / Tomcat creates a **SERVER** span per `/action/...`; contextual name from **`UiServerObservationConvention`** (**`app: get order`**, etc.). **`service.name`** = **`order-demo-app`**.
+- **Manual UI spans:** **`UiController`** adds **INTERNAL** **`step: prepare request`** around **`RestClient`**.
 - **Outbound HTTP:** **`RestClient`** to **`backend-app`** MUST run with the **active trace** so Micrometer injects **`traceparent`** (and optional **`tracestate`**) on the outbound call. **Requirement:** use the **instrumented** **`RestClient`** bean pattern (see `ClientConfig` / `UiController`); avoid ad-hoc **`HttpURLConnection`** or third-party clients that ignore context.
 - **Browser:** This UI is **not** a SPA making direct traced XHR/fetch to the API. The **browser** only does a **full-page GET** to **`frontend-ui`**; the **trace starts in the frontend service** when that request hits the pod. **Browser-to-backend direct** calls would require **browser instrumentation** (e.g. OpenTelemetry JS) **and** CORS/header rules to propagate **`traceparent`** — **out of scope** for the default demo by design.
 
 ### 2. Backend app tracing
 
-- **Inbound HTTP:** MUST **extract** W3C context from headers and create the **server span** as a **child** of the frontend client span (Spring Boot server instrumentation does this when headers are present).
-- **Internal spans:** **INTERNAL** **`backend: load order`**, **`backend: calculate inventory`**, **`backend: calculate price`** under the API HTTP span (same trace id).
-- **Database:** Manual **CLIENT** spans for SQL (**`SELECT …`**) MUST use the **current** context so **Postgres-related spans** stay in the **same trace** as the HTTP request.
+- **Inbound HTTP:** MUST **extract** W3C context from headers and create the **server span** as a **child** of the frontend client span (Spring Boot server instrumentation does this when headers are present). Contextual operation name from **`ApiServerObservationConfig`**: **`step: process order`**, **`step: check inventory`**, **`step: calculate price`**.
+- **Database:** Manual **CLIENT** spans **`db: select …`** MUST use the **current** context so **Postgres-related spans** stay in the **same trace** as the HTTP request.
 
 ### 3. Database spans in Jaeger
 
@@ -321,7 +320,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 ### 4. Trace propagation (recap)
 
 - **W3C Trace Context** on **frontend → backend** via Spring’s default propagators.
-- **Single trace** chain: UI **SERVER** → **INTERNAL** `frontend: prepare request` → **CLIENT** HTTP → API **SERVER** → **INTERNAL** `backend: …` → **CLIENT** `postgres: SELECT …` (all **one trace id**).
+- **Single trace** chain: UI **SERVER** `app: …` → **INTERNAL** `step: prepare request` → **CLIENT** HTTP → API **SERVER** `step: …` → **CLIENT** `db: select …` (all **one trace id**).
 
 ### 5. Service naming
 
@@ -344,13 +343,13 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 **Goal:** Prove **one trace ID** for **one** UI action, with **Service** **`order-demo-app`** and the span hierarchy in **`docs/single-span-tracing.md`**.
 
-**Look for:** **`app: user click …`**, **`frontend: prepare request`**, **`backend: load order`** (or inventory/pricing equivalents), **`postgres: SELECT …`**.
+**Look for:** **`app: get order`** (or inventory/pricing roots), **`step: prepare request`**, **`step: process order`** (or matching API step), **`db: select …`**.
 
 1. **Trigger exactly one UI action** — e.g. open the **`frontend-ui`** Route and click **Get Order** once.
 2. **Open Jaeger UI** (Tempo-backed route in **`observability-single-span`**).
 3. **Service** = **`order-demo-app`** → **Find Traces** → open **one** trace.
 4. Confirm **one trace ID** for all spans and the parent/child shape in **`docs/single-span-tracing.md`**.
-5. Confirm **CLIENT** **`postgres: SELECT …`** with **`db.system=postgresql`** in the **same** trace.
+5. Confirm **CLIENT** **`db: select …`** with **`db.system=postgresql`** in the **same** trace.
 
 **Additional checks:** **Collector:** `oc logs -n observability-single-span -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
 
@@ -364,7 +363,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 2. Click **Get Order** **once** → expect the result page for **`ORD-001`**.
 3. In Jaeger, open **one** trace for that moment in time.
 4. Verify **Trace ID** is shared: copy the trace id from the UI if available; confirm **all** listed spans use that id (no second trace for the same click).
-5. Verify **process** tags show **`order-demo-app`** for all spans; root **SERVER** **`app: user click get order`**; **INTERNAL** **`frontend: prepare request`**; **INTERNAL** **`backend: load order`**; **CLIENT** **`postgres: SELECT orders`** — **same trace ID**.
+5. Verify **process** tags show **`order-demo-app`** for all spans; root **SERVER** **`app: get order`**; **INTERNAL** **`step: prepare request`**; **SERVER** **`step: process order`**; **CLIENT** **`db: select orders`** — **same trace ID**.
 7. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** — each click is a **new** trace; repeat steps 3–6 per action.
 
 ---
@@ -373,7 +372,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 - **Top to bottom:** Time flows downward; **width** ≈ duration.
 - **Expected shape (Get Order):**  
-  **SERVER** **`app: user click get order`** → **INTERNAL** **`frontend: prepare request`** → **CLIENT** HTTP → **SERVER** **`GET /api/orders/...`** → **INTERNAL** **`backend: load order`** → **CLIENT** **`postgres: SELECT orders`**.
+  **SERVER** **`app: get order`** → **INTERNAL** **`step: prepare request`** → **CLIENT** HTTP → **SERVER** **`step: process order`** → **CLIENT** **`db: select orders`** (plus any Micrometer default naming on the HTTP client span).
 - **Latency:** Sum of **network + JVM + JDBC + Postgres**; DB span width is **query + round-trip**; missing widening in DB layer may mean the query is fast or the span is missing (see **Database Span Visibility**).
 - **Missing DB span:** Usually **instrumentation** not reaching JPA (here mitigated by **manual** spans); if **only** auto-instrumentation were used, missing JDBC spans would point to disabled observations or unsupported stack.
 
@@ -398,10 +397,10 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 **One user click (e.g. Get Order)** — **one trace ID** end to end:
 
-1. **SERVER** **`app: user click get order`** (UI pod).  
-2. **INTERNAL** **`frontend: prepare request`** + **CLIENT** HTTP to API.  
-3. **SERVER** **`GET /api/orders/ORD-001`** (API pod).  
-4. **INTERNAL** **`backend: load order`** + **CLIENT** **`postgres: SELECT orders`**.  
+1. **SERVER** **`app: get order`** (UI pod).  
+2. **INTERNAL** **`step: prepare request`** + **CLIENT** HTTP to API.  
+3. **SERVER** **`step: process order`** (API pod).  
+4. **CLIENT** **`db: select orders`**.  
 
 All spans use **`service.name` `order-demo-app`** in Jaeger. See **`docs/single-span-tracing.md`**.
 
