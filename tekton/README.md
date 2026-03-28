@@ -77,7 +77,7 @@ The clone step sets **`HOME=/tmp/git-home`** and **`git config --global safe.dir
 
 A Tekton line such as **`unsuccessful cred copy: ".docker" … mkdir /.docker: permission denied`** is **harmless** for public HTTPS clones (non-root cannot write `/`); ignore it or use a cluster without Docker-credential copy into the step.
 
-The clone task ends with **`chmod -R a+rX .`** so the next **TaskRun** (different random UID) can read the shared workspace; without that, **`verify-repo-layout`** may report **`missing frontend-ui/`** even after a successful clone.
+The clone task runs **`chmod -R a+rX`** on **`frontend-ui`**, **`backend-app`**, and **`openshift`** only (not the workspace mount root, which often returns **Operation not permitted**). That lets the next **TaskRun** (different random UID) read those trees; without it, **`verify-repo-layout`** may report **`missing frontend-ui/`**.
 
 ## Pod Security Admission (restricted)
 

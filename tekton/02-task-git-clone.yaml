@@ -44,6 +44,9 @@ spec:
         rm -rf ./* ./.??* 2>/dev/null || true
         git clone "$(params.url)" .
         git checkout "$(params.revision)"
-        # Later TaskRuns use a different random UID; loosen perms so verify/apply steps can read.
-        chmod -R a+rX .
+        # Later TaskRuns use a different random UID; loosen perms on repo trees only (chmod on
+        # the workspace mount "." is often EPERM — root-owned volume root).
+        for d in frontend-ui backend-app openshift; do
+          chmod -R a+rX "$d"
+        done
         echo "Cloned $(params.url) at $(git rev-parse --short HEAD)"
