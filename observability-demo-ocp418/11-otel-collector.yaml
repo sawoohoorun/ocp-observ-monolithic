@@ -1,4 +1,4 @@
-apiVersion: opentelemetry.io/v1alpha1
+apiVersion: opentelemetry.io/v1beta1
 kind: OpenTelemetryCollector
 metadata:
   name: otel
@@ -16,7 +16,7 @@ spec:
     requests:
       cpu: 100m
       memory: 128Mi
-  config: |
+  config:
     receivers:
       otlp:
         protocols:
@@ -38,4 +38,4 @@ spec:
         traces:
           receivers: [otlp]
           processors: [batch]
-          exporters: [otlp/tempo, debug]
+          exporters: ["otlp/tempo", debug]

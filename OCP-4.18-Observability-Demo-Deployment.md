@@ -1,231 +1,328 @@
-# OpenShift Container Platform 4.18 — Observability Demo (Tempo + OpenTelemetry + Spring Monolith)
+# OpenShift Container Platform 4.18 — Observability Lab (Tempo + OpenTelemetry + This Repository’s Spring Monolith)
 
-This document is a **production-like, demo-friendly** deployment package for **OpenShift Container Platform 4.18**: **Red Hat OpenShift distributed tracing platform (Tempo Operator)**, **Red Hat build of OpenTelemetry Operator**, and a **single Spring Boot monolith** that emits **end-to-end traces** (minimum three spans; this design targets four to five) over **OTLP** through an in-cluster **OpenTelemetry Collector** into **Tempo**, with **no Helm**, **no Argo CD**, **no PVCs**, and **no PersistentVolumes** (ephemeral / in-memory only).
+This guide deploys a **real, versioned application** from the Git repository **[https://github.com/sawoohoorun/ocp-observ-monolithic](https://github.com/sawoohoorun/ocp-observ-monolithic)** on **OpenShift Container Platform 4.18**, together with **Red Hat OpenShift distributed tracing (Tempo Operator)**, **Red Hat build of OpenTelemetry Operator**, and an in-cluster **OpenTelemetry Collector**. Traces flow **OTLP (HTTP)** from the app → **Collector** → **OTLP (gRPC)** → **TempoMonolithic** (in-memory, **no PVC**). Application images are built **inside the cluster** using an OpenShift **`BuildConfig`** (**Docker** strategy + **Git** source).
 
 ---
 
 ## Architecture summary
 
-- **Operator namespaces (cluster pattern)**  
-  - **Tempo Operator** runs in **`openshift-tempo-operator`** (Subscription + OperatorGroup).  
-  - **Red Hat build of OpenTelemetry Operator** runs in **`openshift-opentelemetry-operator`**.  
-  - Both operators are installed in **“All namespaces”** mode (empty `OperatorGroup.spec`), which is the default Red Hat pattern for these operators on OCP 4.x.
+| Layer | Namespace | What runs |
+|-------|-----------|-----------|
+| Tempo Operator | `openshift-tempo-operator` | OLM subscription, operator pods |
+| OpenTelemetry Operator | `openshift-opentelemetry-operator` | OLM subscription, operator pods |
+| Demo workloads | `observability-demo` | `TempoMonolithic` (memory backend), `OpenTelemetryCollector`, `BuildConfig` / `ImageStream`, Spring Boot `Deployment`, `Service`, `Route` |
 
-- **Workload namespace**  
-  - **`observability-demo`** hosts:  
-    - **`TempoMonolithic`** (single Tempo pod, **in-memory trace storage** via tmpfs — no PVC).  
-    - **`OpenTelemetryCollector`** `Deployment` (receives OTLP from the app; exports traces to Tempo).  
-    - **Spring Boot monolith** (`Deployment`, `Service`, `Route`).  
+**Trace path**
 
-- **Why `TempoMonolithic` instead of `TempoStack` in this package**  
-  - **`TempoStack`** is the scalable microservices-style CR. On OpenShift it is designed around **object storage** (S3-compatible, ODF, etc.) and, in typical configurations, **PVC-backed ingesters** (`storageSize` / `storageClassName` in the CRD schema). That conflicts with **“no PVC anywhere.”**  
-  - **`TempoMonolithic`** is the **single-pod, monolithic Tempo** mode (aligned with Grafana Tempo “monolithic deployment”), with **`spec.storage.traces.backend: memory`** — traces live in a **bounded memory volume (tmpfs)** and are **lost on pod restart**, which is appropriate for a **lab/demo** and satisfies **no PVC / no PV**.  
-  - **Jaeger UI** is enabled with an **OpenShift Route** (`spec.jaegerui.route.enabled: true`), protected by **oauth-proxy** as provided by the operator.
+```mermaid
+sequenceDiagram
+  participant U as Client
+  participant R as OpenShift Route
+  participant A as Spring monolith
+  participant C as OTel Collector (otel-collector:4318)
+  participant T as Tempo Monolithic (:4317 ingest)
+  participant J as Jaeger UI Route
+  U->>R: HTTPS GET /ui/orders/{id}
+  R->>A: forward
+  A->>C: OTLP/HTTP POST /v1/traces
+  C->>T: OTLP/gRPC
+  U->>J: search traces (OAuth)
+```
 
-- **Trace path**  
-  1. Browser or `curl` → **OpenShift Route** → Spring Boot `GET /ui/orders/{id}`.  
-  2. Spring creates a **server span** (HTTP instrumentation) and nested spans (service + outbound HTTP to loopback).  
-  3. OTLP **HTTP** → **`otel-collector.observability-demo.svc:4318`**.  
-  4. Collector **OTLP gRPC** → **`tempo-demo.observability-demo.svc:4317`**.  
-  5. Query via **Jaeger UI Route** (authenticated) or **in-cluster** `tempo-demo:3200` with `oc port-forward`.
+**Why `TempoMonolithic` (not `TempoStack`)**  
+`TempoStack` targets object storage and often PVC-backed ingesters. This lab requires **no PVCs** and **ephemeral** trace storage. `TempoMonolithic` with `spec.storage.traces.backend: memory` uses a bounded **tmpfs** volume (lost on pod restart), which matches a demo/lab.
+
+**Why Docker `BuildConfig` + Git (vs classic S2I only)**  
+The application uses **Java 21** and Spring Boot **3.4.x**. A **multi-stage `Dockerfile`** (UBI 9 OpenJDK 21 + **Maven Wrapper**) compiles the project during the OpenShift build without relying on a pre-populated `target/` directory in Git. Many clusters expose `openshift/java` image stream tags only for **Java 17**; Docker strategy with this Dockerfile is **portable** and still **100% in-cluster**. An **optional Source-to-Image** `BuildConfig` is documented for clusters that expose a suitable **Java 21** S2I builder.
 
 ---
 
 ## OCP 4.18-specific assumptions
 
-- **OCP 4.18** with default **OperatorHub** / **`redhat-operators`** `CatalogSource` in **`openshift-marketplace`** (typical connected install).  
-- You can authenticate as **`cluster-admin`** with **`oc`**.  
-- **Restricted/default security contexts** apply; manifests use **non-root**, **read-only root filesystem** where practical, **dropped capabilities**, and **no privileged** containers for the sample app.  
-- **Web console** navigation uses **Administrator** perspective terminology consistent with OCP 4.18 (**Operators → OperatorHub**, **Networking → Routes**, etc.).  
-- **OpenShift 4.20+** may label the software catalog differently (“Ecosystem Software Catalog”); on **4.18**, use **OperatorHub** as below.
+- Connected cluster (or equivalent) with **`redhat-operators`** catalog in `openshift-marketplace`.
+- `cluster-admin` (or equivalent) for operator install and namespace creation.
+- **Git over HTTPS** to `github.com` allowed from build pods (for `BuildConfig` clone). For a **private fork**, add a **source** `Secret` and reference it in `BuildConfig.spec.source`.
+- **Pod Security** restricted profile in `observability-demo` (labels on namespace).
+- **OperatorHub** terminology for web-console operator install on 4.18.
 
 ---
 
-## File tree
+## Existing source code assessment
+
+The demo application **is** this repository. The runnable service lives under:
+
+`observability-demo-ocp418/spring-monolith/`
+
+It is a **single** Spring Boot application (monolith) with:
+
+- **HTTP API**: `GET /ui/orders/{id}` (`OrderController`) — “frontend-style” entry.
+- **Business layer**: `OrderService.getOrder` with a **manual OpenTelemetry span**.
+- **Integration layer**: `InventoryClient` / `PricingClient` using **Spring `RestClient`** to **loopback** internal controllers (`InternalApiController`) — produces **client + server HTTP spans** in the **same trace** when context propagates.
+
+Observability stack manifests and docs live under `observability-demo-ocp418/*.yaml`.
+
+---
+
+## Repository structure summary
+
+```text
+ocp-observ-monolithic/
+├── OCP-4.18-Observability-Demo-Deployment.md   # this guide
+├── README.md                                    # copy of this guide (kept in sync)
+└── observability-demo-ocp418/
+    ├── 00-namespace.yaml
+    ├── 01-operatorgroup.yaml
+    ├── 02-subscriptions.yaml
+    ├── 10-tempo.yaml
+    ├── 11-otel-collector.yaml
+    ├── 20-app-imagestream.yaml
+    ├── 21-app-buildconfig.yaml
+    ├── 22-app-configmap.yaml
+    ├── 23-app-deployment.yaml
+    ├── 24-app-service.yaml
+    ├── 25-app-route.yaml
+    ├── 30-smoketest.md
+    └── spring-monolith/                         # application source (Maven)
+        ├── pom.xml
+        ├── Dockerfile
+        ├── mvnw, mvnw.cmd
+        ├── .mvn/wrapper/
+        ├── .s2i/environment                    # optional S2I builds
+        └── src/main/java/.../demo/
+```
+
+---
+
+## What changed in the application code (delta)
+
+| Change | File(s) | Why |
+|--------|---------|-----|
+| **Added** | `mvnw`, `mvnw.cmd`, `.mvn/wrapper/*` | **Maven Wrapper** so the OpenShift **Docker** build can run `./mvnw package` without installing Maven in the base image via yum. |
+| **Replaced** | `Dockerfile` | **Multi-stage** build: stage 1 compiles with the wrapper; stage 2 runs the fat JAR on UBI OpenJDK 21. The old single-stage file assumed `target/*.jar` already existed (not true for Git-only builds). |
+| **Added** | `.s2i/environment` | Documents `MAVEN_ARGS_APPEND=-DskipTests` for an **optional** Red Hat **Java S2I** `BuildConfig` (not used by default). |
+| **Unchanged (baseline)** | `pom.xml`, `application.yaml`, Java packages under `com.example.demo` | Already declare Micrometer OTel bridge, OTLP exporter, actuator probes, and layered spans. |
+
+No unrelated sample application was introduced; the lab tracks **this** repo.
+
+---
+
+## File tree (manifests + app)
 
 ```text
 observability-demo-ocp418/
 ├── 00-namespace.yaml
 ├── 01-operatorgroup.yaml
 ├── 02-subscriptions.yaml
-├── 10-tempo.yaml                    # TempoMonolithic (not TempoStack — see architecture)
+├── 10-tempo.yaml
 ├── 11-otel-collector.yaml
-├── 20-app-configmap.yaml            # optional: extra config (can be omitted if using env only)
-├── 21-app-deployment.yaml
-├── 22-app-service.yaml
-├── 23-app-route.yaml
+├── 20-app-imagestream.yaml
+├── 21-app-buildconfig.yaml
+├── 22-app-configmap.yaml
+├── 23-app-deployment.yaml
+├── 24-app-service.yaml
+├── 25-app-route.yaml
 ├── 30-smoketest.md
-└── spring-monolith/                 # optional local build context
+└── spring-monolith/
     ├── pom.xml
     ├── Dockerfile
-    └── src/main/java/com/example/demo/
-        ├── DemoApplication.java
-        ├── config/
-        │   └── OpenTelemetryConfig.java
-        ├── web/
-        │   ├── OrderController.java
-        │   └── InternalApiController.java
-        ├── service/
-        │   └── OrderService.java
-        └── integration/
-            ├── InventoryClient.java
-            └── PricingClient.java
-    └── src/main/resources/
-        └── application.yaml
+    ├── mvnw
+    ├── mvnw.cmd
+    ├── .mvn/wrapper/maven-wrapper.properties
+    ├── .s2i/environment
+    └── src/main/java/com/example/demo/...
 ```
 
 ---
 
 ## Prerequisites
 
-1. **OpenShift CLI** (`oc`) matching your cluster (4.18).  
-2. Log in: `oc login …`  
-3. **Cluster admin** (install operators, create cluster-scoped marketplace subscriptions in operator namespaces).  
-4. **Container build** access (e.g. **OpenShift builds** or **podman/docker**) to produce the Spring image.  
-5. **Quotas**: modest CPU/memory for one Tempo pod, one collector pod, one app pod.
+- `oc` CLI (4.18-compatible), logged in as a user who can install operators and create projects.
+- Cluster pull access to **Red Hat registries** used by the Dockerfile (`registry.access.redhat.com/ubi9/openjdk-21`).
+- Build pods must reach **Maven Central** (or your mirror) because the Maven Wrapper downloads the Maven distribution (`distributionUrl` in `maven-wrapper.properties`).
 
 ---
 
 ## Deployment option matrix
 
-| Step | Path A — CLI only | Path B — Web console |
-|------|-------------------|----------------------|
-| Create demo + operator namespaces | **CLI** `oc apply` | **CLI** (recommended) or **Web** (Home → Projects → Create Project) |
-| Install Tempo Operator | **CLI** Subscription in `openshift-tempo-operator` | **Web** OperatorHub install |
-| Install OpenTelemetry Operator | **CLI** Subscription in `openshift-opentelemetry-operator` | **Web** OperatorHub install |
-| Deploy TempoMonolithic + Collector + App | **CLI** `oc apply` | **CLI** `oc apply` (CRs and app YAML) |
-
-**Path B** installs operators from the console; **all custom resources and the application remain declarative YAML** applied with **`oc apply -f`**.
-
----
-
-## Step-by-step deployment procedure
-
-### Phase 0 — CLI context
-
-```bash
-oc whoami
-oc version
-```
-
-You should see **OpenShift** server version **4.18.x** and a user with sufficient rights.
+| Step | Path A — CLI-first | Path B — Web console hybrid |
+|------|--------------------|------------------------------|
+| Projects / namespaces | `oc apply -f 00-namespace.yaml` | Same, or create `observability-demo` in UI |
+| Tempo Operator | `oc apply -f 01-operatorgroup.yaml 02-subscriptions.yaml` (tempo subscription) | OperatorHub → install Tempo Operator |
+| OpenTelemetry Operator | Same subscriptions file | OperatorHub → install Red Hat build of OpenTelemetry |
+| Tempo + Collector CRs | `oc apply -f 10-tempo.yaml 11-otel-collector.yaml` | Same |
+| App image + deploy | `BuildConfig` + `oc start-build` + manifests | Same; builds also visible under **Builds** in console |
 
 ---
 
-### Path A (full CLI) — Operators and operands
-
-#### Step A1 — **CLI**: Create namespaces
+## Path A — Operator installation (CLI)
 
 ```bash
-oc apply -f 00-namespace.yaml
+oc apply -f observability-demo-ocp418/00-namespace.yaml
+oc apply -f observability-demo-ocp418/01-operatorgroup.yaml
+oc apply -f observability-demo-ocp418/02-subscriptions.yaml
 ```
 
-#### Step A2 — **CLI**: OperatorGroups for both operator namespaces
-
-```bash
-oc apply -f 01-operatorgroup.yaml
-```
-
-#### Step A3 — **CLI**: Subscriptions (Tempo + OpenTelemetry)
-
-```bash
-oc apply -f 02-subscriptions.yaml
-```
-
-#### Step A4 — **CLI**: Wait until ClusterServiceVersions succeed
-
-```bash
-oc get csv -n openshift-tempo-operator -w
-# Press Ctrl+C when tempo-product reaches Succeeded
-
-oc get csv -n openshift-opentelemetry-operator -w
-# Press Ctrl+C when opentelemetry-product reaches Succeeded
-```
-
-Quick non-watch check:
+Wait for CSVs:
 
 ```bash
 oc get csv -n openshift-tempo-operator
 oc get csv -n openshift-opentelemetry-operator
 ```
 
-#### Step A5 — **CLI**: Deploy Tempo (monolithic, memory backend) + Collector + Spring app
+Expect **`tempo-product`** and **`opentelemetry-product`** in **Succeeded**.
+
+---
+
+## Path B — Operator installation (web console)
+
+### Tempo Operator
+
+1. **Administrator** perspective.  
+2. **Operators** → **OperatorHub**.  
+3. Search **Tempo** / **distributed tracing**.  
+4. Choose **Tempo Operator** (Red Hat).  
+5. **Install** → **All namespaces on the cluster** → installed namespace **`openshift-tempo-operator`** → channel **`stable`** → **Automatic** → **Install**.
+
+### Red Hat build of OpenTelemetry Operator
+
+1. **Operators** → **OperatorHub**.  
+2. Search **Red Hat build of OpenTelemetry**.  
+3. **Install** → **All namespaces** → **`openshift-opentelemetry-operator`** → **`stable`** → **Automatic** → **Install**.
+
+Then apply operand YAML with CLI:
 
 ```bash
-oc apply -f 10-tempo.yaml
-oc apply -f 11-otel-collector.yaml
-oc apply -f 20-app-configmap.yaml
-oc apply -f 21-app-deployment.yaml
-oc apply -f 22-app-service.yaml
-oc apply -f 23-app-route.yaml
-```
-
-#### Step A6 — **CLI**: Build and push the application image (see [Build and image instructions](#build-and-image-instructions))
-
-After the image is available in **OpenShift internal registry** (example tag used in manifests):
-
-`image-registry.openshift-image-registry.svc:5000/observability-demo/demo-monolith:1.0.0`
-
-rollout:
-
-```bash
-oc rollout status deployment/demo-monolith -n observability-demo --timeout=180s
+oc apply -f observability-demo-ocp418/10-tempo.yaml
+oc apply -f observability-demo-ocp418/11-otel-collector.yaml
 ```
 
 ---
 
-### Path B — Web console operators, then YAML for everything else
-
-#### Step B1 — **CLI** (recommended): Create namespaces and demo project
-
-Same as Path A:
+## Observability stack deployment (CLI)
 
 ```bash
-oc apply -f 00-namespace.yaml
+oc apply -f observability-demo-ocp418/10-tempo.yaml
+oc apply -f observability-demo-ocp418/11-otel-collector.yaml
 ```
 
-*(Optional **Web**)*: **Administrator** → **Home** → **Projects** → **Create Project** → Name **`observability-demo`**.  
-Still create **`openshift-tempo-operator`** and **`openshift-opentelemetry-operator`** via CLI (admins usually prefer CLI for system namespaces).
+**Collector OTLP HTTP endpoint (in-cluster DNS)** used by the app:
 
-#### Step B2 — **Web**: Install **Tempo Operator** from OperatorHub
+`http://otel-collector.observability-demo.svc.cluster.local:4318`
 
-1. Switch to **Administrator** perspective (top-left menu).  
-2. **Operators** → **OperatorHub**.  
-3. Search: **`Tempo`** or **`Red Hat OpenShift distributed tracing platform`**.  
-4. Open the **Tempo Operator** (publisher **Red Hat**).  
-5. Click **Install**.  
-6. **Installation mode**: **All namespaces on the cluster** (cluster-wide).  
-7. **Installed Namespace**: **`openshift-tempo-operator`** (create the project if prompted).  
-8. **Update channel**: **`stable`**.  
-9. **Approval**: **Automatic**.  
-10. **Install** → wait until **Succeeded** on the **Installed Operators** page.
+**Tempo OTLP gRPC ingest** (collector exporter target):
 
-#### Step B3 — **Web**: Install **Red Hat build of OpenTelemetry Operator**
+`tempo-demo.observability-demo.svc.cluster.local:4317`
 
-1. **Operators** → **OperatorHub**.  
-2. Search: **`Red Hat build of OpenTelemetry`**.  
-3. Open **Red Hat build of OpenTelemetry Operator** (publisher **Red Hat**).  
-4. Click **Install**.  
-5. **Installation mode**: **All namespaces on the cluster**.  
-6. **Installed Namespace**: **`openshift-opentelemetry-operator`**.  
-7. **Update channel**: **`stable`**.  
-8. **Approval**: **Automatic**.  
-9. **Install** → verify **Succeeded**.
+---
 
-#### Step B4 — **CLI**: Apply TempoMonolithic, Collector, and application manifests
+## Application build steps (OpenShift build — in cluster)
 
-Even on Path B, apply operands with **`oc`**:
+### 1. Create / ensure project
+
+Already included in `00-namespace.yaml` for `observability-demo`. If you created the project separately:
 
 ```bash
-oc apply -f 10-tempo.yaml
-oc apply -f 11-otel-collector.yaml
-oc apply -f 20-app-configmap.yaml
-oc apply -f 21-app-deployment.yaml
-oc apply -f 22-app-service.yaml
-oc apply -f 23-app-route.yaml
+oc project observability-demo
 ```
 
-Then build/push the image and wait for rollout (same as Path A Step A6).
+### 2. Import manifest resources (ImageStream, BuildConfig, supporting objects)
+
+```bash
+cd observability-demo-ocp418
+oc apply -f 20-app-imagestream.yaml
+oc apply -f 21-app-buildconfig.yaml
+oc apply -f 22-app-configmap.yaml
+oc apply -f 24-app-service.yaml
+oc apply -f 25-app-route.yaml
+```
+
+(`Deployment` is applied **after** the first successful build so the image tag exists; see below.)
+
+### 3. Source repository reference
+
+`21-app-buildconfig.yaml` pins:
+
+- **URI**: `https://github.com/sawoohoorun/ocp-observ-monolithic.git`  
+- **ref**: `main`  
+- **contextDir**: `observability-demo-ocp418/spring-monolith`
+
+To use a **fork**, edit `spec.source.git.uri` (and `ref`) in `21-app-buildconfig.yaml`, or `oc patch` / re-apply.
+
+### 4. Start the build and watch logs
+
+```bash
+oc start-build demo-monolith -n observability-demo --follow
+```
+
+### 5. Inspect build and image
+
+```bash
+oc get builds -n observability-demo
+oc describe build demo-monolith-1 -n observability-demo
+oc logs -n observability-demo -f build/demo-monolith-1
+oc describe is demo-monolith -n observability-demo
+oc get is demo-monolith -n observability-demo -o wide
+```
+
+### 6. Deploy the built image
+
+After **Complete**:
+
+```bash
+oc apply -f 23-app-deployment.yaml
+oc rollout status deployment/demo-monolith -n observability-demo --timeout=300s
+```
+
+The `Deployment` uses an **ImageStreamTag** trigger annotation so future rebuilds of `demo-monolith:1.0.0` can roll out automatically.
+
+### 7. Expose application (already declarative)
+
+`24-app-service.yaml` and `25-app-route.yaml` define **ClusterIP** service and **edge-terminated Route**.
+
+```bash
+oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}{"\n"}'
+```
+
+### Web console — build
+
+**Administrator** → **Builds** → **BuildConfigs** → project **`observability-demo`** → **demo-monolith** → **Start Build** → view **Logs**.
+
+---
+
+## Docker vs Source-to-Image (explanation)
+
+- **Default in repo**: **Docker** `BuildConfig` + **Git** source + multi-stage **`Dockerfile`**. Reason: **Java 21** + reproducible build using **Maven Wrapper** without depending on `openshift/java:21` existing on every cluster.
+- **Optional S2I**: If your cluster provides **`java:21`** (or another Java 21-capable Red Hat S2I builder) in the **`openshift`** namespace, you can add a second `BuildConfig` with **`sourceStrategy`** and builder `ImageStreamTag` `java:21`. The repo includes **`.s2i/environment`** with `MAVEN_ARGS_APPEND=-DskipTests` for that pattern.
+
+**Optional S2I `BuildConfig` fragment** (separate name to avoid clashing with the Docker-based BC):
+
+```yaml
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: demo-monolith-s2i
+  namespace: observability-demo
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/sawoohoorun/ocp-observ-monolithic.git
+      ref: main
+    contextDir: observability-demo-ocp418/spring-monolith
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        name: java:21
+        namespace: openshift
+  output:
+    to:
+      kind: ImageStreamTag
+      name: demo-monolith:1.0.0
+```
+
+Verify tags first: `oc get is -n openshift java` (or your platform’s documented Java S2I image stream).
 
 ---
 
@@ -260,8 +357,6 @@ metadata:
     pod-security.kubernetes.io/warn: restricted
 ```
 
----
-
 ### `01-operatorgroup.yaml`
 
 ```yaml
@@ -280,8 +375,6 @@ metadata:
   namespace: openshift-opentelemetry-operator
 spec: {}
 ```
-
----
 
 ### `02-subscriptions.yaml`
 
@@ -316,11 +409,7 @@ spec:
   sourceNamespace: openshift-marketplace
 ```
 
----
-
 ### `10-tempo.yaml`
-
-**Note:** This file uses **`TempoMonolithic`** (`kind: TempoMonolithic`) so traces are stored in **memory (tmpfs)** with **no PVC**. A **`TempoStack`** CR is **not** used here because it is intended for **object storage + distributed components** and commonly **PVC-backed ingesters**, which violates this demo’s storage constraints.
 
 ```yaml
 apiVersion: tempo.grafana.com/v1alpha1
@@ -348,14 +437,10 @@ spec:
           block_retention: 24h
 ```
 
----
-
 ### `11-otel-collector.yaml`
 
-The collector **Service** name follows the OpenTelemetry Operator convention **`{metadata.name}-collector`**. With `metadata.name: otel`, the OTLP HTTP endpoint inside the cluster is **`http://otel-collector.observability-demo.svc.cluster.local:4318`**.
-
 ```yaml
-apiVersion: opentelemetry.io/v1alpha1
+apiVersion: opentelemetry.io/v1beta1
 kind: OpenTelemetryCollector
 metadata:
   name: otel
@@ -373,7 +458,7 @@ spec:
     requests:
       cpu: 100m
       memory: 128Mi
-  config: |
+  config:
     receivers:
       otlp:
         protocols:
@@ -395,24 +480,58 @@ spec:
         traces:
           receivers: [otlp]
           processors: [batch]
-          exporters: [otlp/tempo, debug]
+          exporters: ["otlp/tempo", debug]
 ```
 
-**If** your installed collector build rejects the **`debug`** exporter name, replace the `debug` block with:
+If **`debug`** is unsupported, under `spec.config.exporters` use **`logging`** with `loglevel: debug` and set exporters to `["otlp/tempo", logging]`.
+
+### `20-app-imagestream.yaml`
 
 ```yaml
-    exporters:
-      logging:
-        loglevel: debug
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: demo-monolith
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/name: demo-monolith
+    app.kubernetes.io/part-of: observability-demo
 ```
 
-and change the pipeline exporters list to `[otlp/tempo, logging]`.
+### `21-app-buildconfig.yaml`
 
----
+```yaml
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: demo-monolith
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/name: demo-monolith
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+  runPolicy: Serial
+  source:
+    type: Git
+    git:
+      uri: https://github.com/sawoohoorun/ocp-observ-monolithic.git
+      ref: main
+    contextDir: observability-demo-ocp418/spring-monolith
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: demo-monolith:1.0.0
+  triggers:
+    - type: ConfigChange
+```
 
-### `20-app-configmap.yaml`
-
-Optional placeholder for non-secret config. The Deployment uses **environment variables** for OTLP; this ConfigMap can hold **`application.yaml` overrides** if you mount it later. Here it documents the demo and holds a static **banner** file for clarity (no mount required).
+### `22-app-configmap.yaml`
 
 ```yaml
 apiVersion: v1
@@ -425,16 +544,13 @@ metadata:
     app.kubernetes.io/part-of: observability-demo
 data:
   README: |
-    Demo monolith for OCP 4.18 observability lab.
+    Demo monolith for OCP 4.18 observability lab (this repository).
     Primary endpoint: GET /ui/orders/{id}
     Actuator health: /actuator/health
+    Build: OpenShift BuildConfig demo-monolith (Docker strategy + Git).
 ```
 
----
-
-### `21-app-deployment.yaml`
-
-**Image:** after you build and push to the internal registry, this reference is valid cluster-internal. For **Path B** builds, adjust only if your image name or tag differs.
+### `23-app-deployment.yaml`
 
 ```yaml
 apiVersion: apps/v1
@@ -446,6 +562,9 @@ metadata:
     app.kubernetes.io/name: demo-monolith
     app.kubernetes.io/part-of: observability-demo
     app.kubernetes.io/component: application
+  annotations:
+    image.openshift.io/triggers: |-
+      [{"from":{"kind":"ImageStreamTag","name":"demo-monolith:1.0.0","namespace":"observability-demo"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
 spec:
   replicas: 1
   selector:
@@ -519,9 +638,7 @@ spec:
           emptyDir: {}
 ```
 
----
-
-### `22-app-service.yaml`
+### `24-app-service.yaml`
 
 ```yaml
 apiVersion: v1
@@ -543,9 +660,7 @@ spec:
   type: ClusterIP
 ```
 
----
-
-### `23-app-route.yaml`
+### `25-app-route.yaml`
 
 ```yaml
 apiVersion: route.openshift.io/v1
@@ -568,643 +683,201 @@ spec:
     insecureEdgeTerminationPolicy: Redirect
 ```
 
-**Tempo / Jaeger UI Route:** created by the **Tempo Operator** when `spec.jaegerui.route.enabled: true`. Retrieve it with:
-
-```bash
-oc get routes -n observability-demo
-```
-
-You should see a route similar to **`tempo-demo-jaegerui`** (exact name may vary slightly by operator version; use `oc get route -o wide`).
-
 ---
 
-### `30-smoketest.md`
+## Application source — key files (reference)
 
-```markdown
-# Smoke test — Observability demo (OCP 4.18)
+The full tree is in Git. Critical pieces:
 
-## 1. Application HTTP
+**`spring-monolith/pom.xml`** — OpenTelemetry-related dependencies:
 
-```bash
-ROUTE=$(oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}')
-curl -sk "https://${ROUTE}/ui/orders/42"
-```
+- `micrometer-tracing-bridge-otel`
+- `opentelemetry-exporter-otlp`
 
-Expected: HTTP 200 and JSON body containing `orderId` **42**.
+**`spring-monolith/src/main/resources/application.yaml`**
 
-## 2. Jaeger UI (Tempo query)
+- `spring.application.name: demo-monolith` → **`service.name`** in exported traces (via Spring Boot Micrometer OTel integration).
+- `management.otlp.tracing.endpoint` → default OTLP HTTP URL (overridden in-cluster by env).
+- `management.tracing.sampling.probability: 1.0`
+- `demo.internal-base-url` → loopback base URL for `RestClient` (overridden by `DEMO_INTERNAL_BASE_URL` in `Deployment`).
 
-1. Open the Jaeger UI route hostname from:
-
-   ```bash
-   oc get routes -n observability-demo
-   ```
-
-2. Log in with your OpenShift user (oauth-proxy).
-
-3. Select service **`demo-monolith`** (or the service name shown in traces).
-
-4. Find a trace for **`GET /ui/orders/{id}`** and confirm spans:
-   - HTTP receive on `/ui/orders/*`
-   - `OrderService.getOrder`
-   - Client call to `/internal/inventory/*`
-   - Server `/internal/inventory/*`
-   - (Optional) pricing client/server spans
-
-## 3. Collector logs (debug exporter)
-
-```bash
-oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=80
-```
-
-You should see exported span batches in the **debug** (or **logging**) exporter output.
-
-## 4. Tempo monolithic pod
-
-```bash
-oc get pods -n observability-demo -l app.kubernetes.io/name=tempo
-```
-
-`READY` should be **1/1** (exact labels may vary; use `oc get pods -n observability-demo` if needed).
-```
-
----
-
-## Optional Spring Boot source files
-
-### `spring-monolith/pom.xml`
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
-  <modelVersion>4.0.0</modelVersion>
-
-  <parent>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-parent</artifactId>
-    <version>3.4.3</version>
-    <relativePath/>
-  </parent>
-
-  <groupId>com.example</groupId>
-  <artifactId>demo-monolith</artifactId>
-  <version>1.0.0</version>
-  <name>demo-monolith</name>
-  <description>OCP observability demo monolith</description>
-
-  <properties>
-    <java.version>21</java.version>
-  </properties>
-
-  <dependencies>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-web</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-actuator</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.micrometer</groupId>
-      <artifactId>micrometer-tracing-bridge-otel</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>io.opentelemetry</groupId>
-      <artifactId>opentelemetry-exporter-otlp</artifactId>
-    </dependency>
-  </dependencies>
-
-  <build>
-    <plugins>
-      <plugin>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-maven-plugin</artifactId>
-      </plugin>
-    </plugins>
-  </build>
-</project>
-```
-
----
-
-### `spring-monolith/Dockerfile`
+**`Dockerfile`** (multi-stage) — builds fat JAR then runs as UID **185**.
 
 ```dockerfile
+FROM registry.access.redhat.com/ubi9/openjdk-21:latest AS build
+WORKDIR /workspace
+USER root
+COPY mvnw mvnw.cmd pom.xml ./
+COPY .mvn .mvn
+COPY src ./src
+RUN chmod +x mvnw && ./mvnw -B -DskipTests package
+
 FROM registry.access.redhat.com/ubi9/openjdk-21:latest
-
 WORKDIR /app
-COPY target/demo-monolith-1.0.0.jar /app/app.jar
-
+COPY --from=build /workspace/target/demo-monolith-1.0.0.jar /app/app.jar
 EXPOSE 8080
 USER 185
-
 ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0"
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
 ```
 
----
+**`.s2i/environment`** (optional S2I only)
 
-### `spring-monolith/src/main/resources/application.yaml`
-
-```yaml
-server:
-  port: 8080
-
-spring:
-  application:
-    name: demo-monolith
-
-management:
-  endpoint:
-    health:
-      probes:
-        enabled: true
-  endpoints:
-    web:
-      exposure:
-        include: health,info
-  tracing:
-    sampling:
-      probability: 1.0
-  otlp:
-    tracing:
-      endpoint: http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces
+```text
+MAVEN_ARGS_APPEND=-DskipTests
 ```
 
 ---
 
-### `spring-monolith/src/main/java/com/example/demo/DemoApplication.java`
+## OpenTelemetry code walkthrough
 
-```java
-package com.example.demo;
+1. **Dependencies** — Declared in **`pom.xml`**: `spring-boot-starter-web`, `spring-boot-starter-actuator`, **`micrometer-tracing-bridge-otel`**, **`opentelemetry-exporter-otlp`**. Spring Boot’s Micrometer tracing auto-configuration bridges to the OpenTelemetry SDK used for export.
 
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
+2. **Export configuration** — **`application.yaml`** sets `management.otlp.tracing.endpoint`. In OpenShift, **`MANAGEMENT_OTLP_TRACING_ENDPOINT`** on the `Deployment` overrides it to  
+   `http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`  
+   (**OTLP over HTTP**, port **4318** on the Collector `Service` **`otel-collector`**).
 
-@SpringBootApplication
-public class DemoApplication {
-  public static void main(String[] args) {
-    SpringApplication.run(DemoApplication.class, args);
-  }
-}
-```
+3. **Environment variables** — `MANAGEMENT_OTLP_TRACING_ENDPOINT`, `MANAGEMENT_TRACING_SAMPLING_PROBABILITY`, `DEMO_INTERNAL_BASE_URL`, `SERVER_PORT` (see `23-app-deployment.yaml`).
 
----
+4. **Collector DNS** — Service name **`otel-collector`** (from `OpenTelemetryCollector` metadata.name **`otel`**). FQDN: **`otel-collector.observability-demo.svc.cluster.local`**.
 
-### `spring-monolith/src/main/java/com/example/demo/config/OpenTelemetryConfig.java`
+5. **Instrumentation mix**  
+   - **Automatic (Spring / Micrometer / Tomcat)**: incoming HTTP (`/ui/orders/...`, `/internal/...`), outgoing **`RestClient`** HTTP client spans.  
+   - **Manual (OpenTelemetry API)**: `OrderService.getOrder` creates a named span **`OrderService.getOrder`** via injected **`Tracer`**.
 
-```java
-package com.example.demo.config;
+6. **Where spans originate**  
+   - **Controller**: `OrderController` — server span for `GET /ui/orders/{id}`.  
+   - **Service**: `OrderService` — manual span `OrderService.getOrder`.  
+   - **Integration**: `InventoryClient` / `PricingClient` — client spans; `InternalApiController` — server spans for internal routes.
 
-import io.opentelemetry.api.OpenTelemetry;
-import io.opentelemetry.api.trace.Tracer;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+7. **Single trace** — The manual span runs **inside** the active context created by the incoming HTTP span (`try (Scope scope = span.makeCurrent())`). `RestClient` is part of Spring Boot 3 observability and propagates **W3C trace context** on loopback calls, so client + internal server spans attach as **children** of the same trace.
 
-@Configuration
-public class OpenTelemetryConfig {
+8. **Context propagation** — Same JVM, loopback to `http://127.0.0.1:8080` with headers injected by instrumented `RestClient`; Tempo shows a **single trace** with multiple spans.
 
-  @Bean
-  Tracer tracer(ObjectProvider<OpenTelemetry> openTelemetry) {
-    OpenTelemetry otel = openTelemetry.getIfAvailable();
-    if (otel == null) {
-      return io.opentelemetry.api.trace.TracerProvider.noop().get("noop");
-    }
-    return otel.getTracer("demo-monolith");
-  }
-}
-```
+9. **Manual span code** — `OrderService` uses `tracer.spanBuilder("OrderService.getOrder").startSpan()` and `span.makeCurrent()` so business logic is visible even if you tune auto-instrumentation.
 
----
+10. **`service.name` / resource** — From **`spring.application.name`** (`demo-monolith`) via Spring Boot’s Micrometer/OpenTelemetry resource defaults unless overridden by standard OTel resource env vars (not required here).
 
-### `spring-monolith/src/main/java/com/example/demo/web/OrderController.java`
-
-```java
-package com.example.demo.web;
-
-import com.example.demo.service.OrderService;
-import java.util.Map;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RestController;
-
-@RestController
-public class OrderController {
-
-  private final OrderService orderService;
-
-  public OrderController(OrderService orderService) {
-    this.orderService = orderService;
-  }
-
-  @GetMapping("/ui/orders/{id}")
-  public Map<String, Object> getOrderUi(@PathVariable String id) {
-    return orderService.getOrder(id);
-  }
-}
-```
-
----
-
-### `spring-monolith/src/main/java/com/example/demo/service/OrderService.java`
-
-```java
-package com.example.demo.service;
-
-import com.example.demo.integration.InventoryClient;
-import com.example.demo.integration.PricingClient;
-import io.opentelemetry.api.trace.Span;
-import io.opentelemetry.api.trace.Tracer;
-import io.opentelemetry.context.Scope;
-import java.util.HashMap;
-import java.util.Map;
-import org.springframework.stereotype.Service;
-
-@Service
-public class OrderService {
-
-  private final Tracer tracer;
-  private final InventoryClient inventoryClient;
-  private final PricingClient pricingClient;
-
-  public OrderService(Tracer tracer, InventoryClient inventoryClient, PricingClient pricingClient) {
-    this.tracer = tracer;
-    this.inventoryClient = inventoryClient;
-    this.pricingClient = pricingClient;
-  }
-
-  public Map<String, Object> getOrder(String id) {
-    Span span = tracer.spanBuilder("OrderService.getOrder").startSpan();
-    try (Scope scope = span.makeCurrent()) {
-      span.setAttribute("order.id", id);
-
-      boolean inStock = inventoryClient.checkStock(id);
-      long priceCents = pricingClient.getPriceCents(id);
-
-      Map<String, Object> body = new HashMap<>();
-      body.put("orderId", id);
-      body.put("inStock", inStock);
-      body.put("priceCents", priceCents);
-      body.put("layer", "monolith-ui-to-service-to-integration");
-      return body;
-    } finally {
-      span.end();
-    }
-  }
-}
-```
-
----
-
-### `spring-monolith/src/main/java/com/example/demo/integration/InventoryClient.java`
-
-```java
-package com.example.demo.integration;
-
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
-
-@Component
-public class InventoryClient {
-
-  private final RestClient restClient;
-
-  public InventoryClient(@Value("${demo.internal-base-url:http://127.0.0.1:8080}") String base) {
-    this.restClient = RestClient.builder().baseUrl(base).build();
-  }
-
-  public boolean checkStock(String id) {
-    return Boolean.parseBoolean(
-        restClient
-            .get()
-            .uri("/internal/inventory/{id}/stock", id)
-            .retrieve()
-            .body(String.class));
-  }
-}
-```
-
----
-
-### `spring-monolith/src/main/java/com/example/demo/integration/PricingClient.java`
-
-```java
-package com.example.demo.integration;
-
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
-
-@Component
-public class PricingClient {
-
-  private final RestClient restClient;
-
-  public PricingClient(@Value("${demo.internal-base-url:http://127.0.0.1:8080}") String base) {
-    this.restClient = RestClient.builder().baseUrl(base).build();
-  }
-
-  public long getPriceCents(String id) {
-    String body =
-        restClient
-            .get()
-            .uri("/internal/pricing/{id}/cents", id)
-            .retrieve()
-            .body(String.class);
-    return Long.parseLong(body.trim());
-  }
-}
-```
-
----
-
-### `spring-monolith/src/main/java/com/example/demo/web/InternalApiController.java`
-
-```java
-package com.example.demo.web;
-
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RestController;
-
-@RestController
-public class InternalApiController {
-
-  @GetMapping("/internal/inventory/{id}/stock")
-  public String stock(@PathVariable String id) {
-    return String.valueOf(!id.equals("0"));
-  }
-
-  @GetMapping("/internal/pricing/{id}/cents")
-  public String price(@PathVariable String id) {
-    long cents = 999L + Math.max(0, id.length()) * 11L;
-    return Long.toString(cents);
-  }
-}
-```
-
-**Span expectation:** Spring Boot observability creates **HTTP server spans** for `/ui/orders/{id}` and the internal endpoints, **HTTP client spans** for loopback `RestClient` calls, and a **custom span** `OrderService.getOrder` — typically **five** spans in one trace when context propagation is active.
-
----
-
-## Build and image instructions
-
-### Option 1 — Local build with **podman** / **docker**, then **OpenShift import**
-
-From `spring-monolith/`:
-
-```bash
-mvn -q -DskipTests package
-podman build -t demo-monolith:1.0.0 .
-```
-
-Log in to the internal registry and push (replace `default` project path if you use another user):
-
-```bash
-oc registry login --registry="$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}' 2>/dev/null)" || true
-# If your cluster uses the internal service DNS from a bastion with oc login:
-INTERNAL_REGISTRY=$(oc get configs.imageregistry.operator.openshift.io/cluster -o jsonpath='{.status.internalRegistryHostname}')
-podman tag demo-monolith:1.0.0 "${INTERNAL_REGISTRY}/observability-demo/demo-monolith:1.0.0"
-podman push "${INTERNAL_REGISTRY}/observability-demo/demo-monolith:1.0.0"
-```
-
-### Option 2 — **OpenShift build** (Binary build)
-
-```bash
-oc project observability-demo
-oc new-build --name=demo-monolith --binary --strategy=docker --dockerfile-path=Dockerfile
-# from spring-monolith directory after mvn package:
-oc start-build demo-monolith --from-dir=. --follow
-oc tag demo-monolith:latest demo-monolith:1.0.0
-```
-
-Ensure **`21-app-deployment.yaml`** references the resulting **ImageStreamTag** or internal registry image you tagged.
+**`OpenTelemetryConfig`** supplies a **`Tracer`** bean backed by the auto-configured **`OpenTelemetry`** instance (falls back to noop if missing).
 
 ---
 
 ## Verification steps
 
-### 1) Operators installed
+| Goal | Commands |
+|------|----------|
+| Operators | `oc get csv -n openshift-tempo-operator` ; `oc get csv -n openshift-opentelemetry-operator` |
+| Tempo CR | `oc get tempomonolithic -n observability-demo` ; `oc describe tempomonolithic demo -n observability-demo` |
+| Collector | `oc get opentelemetrycollector -n observability-demo` ; `oc get pods -n observability-demo \| grep otel` |
+| Build | `oc get builds -n observability-demo` ; `oc logs -n observability-demo build/<name>` |
+| Image | `oc describe is demo-monolith -n observability-demo` |
+| App pod | `oc get pods -n observability-demo -l app.kubernetes.io/name=demo-monolith` ; `oc describe pod -l app.kubernetes.io/name=demo-monolith -n observability-demo` |
+| Route | `oc get route demo-monolith -n observability-demo` |
+| Traffic | `curl -sk "https://$(oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}')/ui/orders/5"` |
+| Collector logs | `oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=100` |
+| Tempo / Jaeger UI | `oc get routes -n observability-demo` (Jaeger UI route created by Tempo operator); optional `oc port-forward` to query API if needed |
 
-```bash
-oc get csv -n openshift-tempo-operator
-oc get csv -n openshift-opentelemetry-operator
-oc get installplan -n openshift-tempo-operator
-oc get installplan -n openshift-opentelemetry-operator
-```
+---
 
-**Expected:** CSVs **`tempo-product`** and **`opentelemetry-product`** in phase **`Succeeded`**.
+## Smoke test
 
-### 2) Tempo custom resource ready
-
-```bash
-oc get tempomonolithic -n observability-demo
-oc describe tempomonolithic demo -n observability-demo
-```
-
-**Expected:** A **Ready** condition (wording may be `Ready` / `Available` depending on operator version) and a running Tempo pod.
-
-### 3) OpenTelemetry Collector ready
-
-```bash
-oc get opentelemetrycollector -n observability-demo
-oc get deploy -n observability-demo -l app.kubernetes.io/name=otel-collector
-oc get pods -n observability-demo -l app.kubernetes.io/name=otel-collector
-```
-
-**Expected:** Deployment **Available**, pod **Running**.
-
-If labels differ:
-
-```bash
-oc get pods -n observability-demo | grep otel
-```
-
-### 4) Generate application traffic
-
-```bash
-HOST=$(oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}')
-curl -sk "https://${HOST}/ui/orders/7"
-```
-
-### 5) Confirm traces reach the collector
-
-```bash
-oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=100
-```
-
-**Expected:** Debug/logging output showing **spans** or **ResourceSpans** for service **`demo-monolith`**.
-
-### 6) Confirm traces in Tempo (CLI-friendly)
-
-Jaeger UI is simplest (browser). For **API-style** checks without resolving OAuth in `curl`, port-forward the query frontend service (name may vary; discover with):
-
-```bash
-oc get svc -n observability-demo | grep -E 'tempo|jaeger|query'
-```
-
-Example pattern for monolithic deployments (adjust service name to your cluster):
-
-```bash
-# Replace SERVICE if your cluster lists a different tempo query service
-SERVICE=tempo-demo-query-frontend
-oc port-forward -n observability-demo "svc/${SERVICE}" 3200:3200
-```
-
-In another terminal:
-
-```bash
-curl -s "http://127.0.0.1:3200/api/services" | head
-```
-
-**Expected:** JSON listing services including **`demo-monolith`**.
+See **`observability-demo-ocp418/30-smoketest.md`** (build status, curl, Jaeger UI, collector logs, Tempo pod).
 
 ---
 
 ## Expected trace flow
 
-1. **Edge / frontend:** `GET /ui/orders/{id}` → **HTTP server span** (Spring MVC / Tomcat instrumentation).  
-2. **Business:** **`OrderService.getOrder`** → **manual span** (custom business layer).  
-3. **Integration (inventory):** **HTTP client** `GET /internal/inventory/{id}/stock` → **HTTP server** on the same pod (loopback) → **two spans** (client + server).  
-4. **Integration (pricing):** **HTTP client** `GET /internal/pricing/{id}/cents` → **HTTP server** → **two more spans** (bonus layer).
+One trace for `GET /ui/orders/{id}` typically includes:
 
-**Minimum interpretable layers for the demo:** (1) UI HTTP, (2) `OrderService.getOrder`, (3) inventory client/server pair as “backend integration.”
+1. **Server** span — HTTP ingress to `/ui/orders/{id}`.  
+2. **Internal** span — **`OrderService.getOrder`** (manual).  
+3. **Client** span — `RestClient` `GET` to `/internal/inventory/...`.  
+4. **Server** span — internal HTTP `/internal/inventory/...`.  
+5. Additional **client/server** pairs for pricing (bonus).
+
+Minimum **three** meaningful layers: ingress + business + integration.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | What to do |
-|--------|--------------|------------|
-| Subscription not installing | Disconnected cluster / missing `redhat-operators` | Install a **CatalogSource** mirroring Red Hat operators or use a connected cluster. `oc get packagemanifest -n openshift-marketplace \| grep tempo` |
-| CSV stuck | Insufficient permissions or conflicting OperatorGroup | `oc describe subscription -n openshift-tempo-operator tempo-product` |
-| `TempoMonolithic` not created | CRD not installed yet | Wait for CSV **Succeeded**; `oc get crd \| grep tempo` |
-| Collector pod crash loop | `debug` exporter unsupported | Swap **`debug`** for **`logging`** exporter (see `11-otel-collector.yaml` note). |
-| No traces in Tempo | Wrong Tempo endpoint | Verify **`tempo-demo.observability-demo.svc.cluster.local:4317`** resolves: `oc get svc -n observability-demo` |
-| App cannot reach collector | Wrong service name | Must target **`otel-collector`** Service (from collector name **`otel`**). `oc get svc otel-collector -n observability-demo` |
-| App `ImagePullBackOff` | Image not pushed to expected name/tag | `oc describe pod -l app.kubernetes.io/name=demo-monolith -n observability-demo` |
-| Read-only root filesystem errors | App writes outside `/tmp` | Only `/tmp` is writable in the Deployment; keep Spring temp dir on `/tmp` (default `java.io.tmpdir` uses `/tmp`). |
-| Jaeger UI 403 / OAuth | Expected for Route | Log in with cluster credentials; use **`oc port-forward`** for raw HTTP API testing. |
-
-**NetworkPolicy:** If your cluster enforces strict policies and traffic is blocked, inspect Tempo operator-generated **NetworkPolicy** objects in **`observability-demo`** and adjust according to your organization’s standards (not shown here to avoid over-broad rules).
+| Issue | Checks |
+|-------|--------|
+| Build fails cloning Git | Build pod logs; corporate proxy; private repo needs `sourceSecret`. |
+| Build fails Maven download | Cluster egress to Maven Central; use mirror and custom `settings.xml` via `BuildConfig` secret if required. |
+| `java:21` S2I missing | Prefer default **Docker** `BuildConfig` in this repo. |
+| Image pull errors on app | Ensure build **Complete** and tag **`demo-monolith:1.0.0`** exists: `oc describe is demo-monolith -n observability-demo`. |
+| No traces | Verify OTLP URL env on pod: `oc set env deployment/demo-monolith --list -n observability-demo`; collector logs; Tempo pod running. |
+| `debug` exporter error | Switch collector exporter to **`logging`** (see `11-otel-collector.yaml` note). |
+| Jaeger UI auth | Use OpenShift login; use `oc port-forward` for API debugging if needed. |
 
 ---
 
 ## Cleanup
 
-### Remove demo workloads
-
 ```bash
-oc delete -f 23-app-route.yaml --ignore-not-found
-oc delete -f 22-app-service.yaml --ignore-not-found
-oc delete -f 21-app-deployment.yaml --ignore-not-found
-oc delete -f 20-app-configmap.yaml --ignore-not-found
-oc delete -f 11-otel-collector.yaml --ignore-not-found
-oc delete -f 10-tempo.yaml --ignore-not-found
-```
-
-### Remove demo namespace (optional)
-
-```bash
+oc delete -f observability-demo-ocp418/25-app-route.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/24-app-service.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/23-app-deployment.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/22-app-configmap.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/21-app-buildconfig.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/20-app-imagestream.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/11-otel-collector.yaml --ignore-not-found
+oc delete -f observability-demo-ocp418/10-tempo.yaml --ignore-not-found
 oc delete project observability-demo
-```
-
-### Remove OpenTelemetry operator subscription
-
-```bash
-oc delete -f 02-subscriptions.yaml --ignore-not-found
-oc delete subscription opentelemetry-product -n openshift-opentelemetry-operator --ignore-not-found
-oc delete csv -n openshift-opentelemetry-operator -l operators.coreos.com/opentelemetry-product.openshift-opentelemetry-operator
-```
-
-### Remove Tempo operator subscription
-
-```bash
-oc delete subscription tempo-product -n openshift-tempo-operator --ignore-not-found
-oc delete csv -n openshift-tempo-operator -l operators.coreos.com/tempo-product.openshift-tempo-operator
-```
-
-### Remove operator namespaces (optional, cluster housekeeping)
-
-```bash
-oc delete -f 01-operatorgroup.yaml --ignore-not-found
-oc delete project openshift-opentelemetry-operator
-oc delete project openshift-tempo-operator
-```
-
-**Note:** Deleting operator namespaces removes **all** operands managed by those operators cluster-wide. Only do this if you understand the impact.
-
----
-
-## Apply All (Path A — exact `oc apply -f` order)
-
-```bash
-oc apply -f 00-namespace.yaml
-oc apply -f 01-operatorgroup.yaml
-oc apply -f 02-subscriptions.yaml
-# wait for both CSVs Succeeded
-oc apply -f 10-tempo.yaml
-oc apply -f 11-otel-collector.yaml
-oc apply -f 20-app-configmap.yaml
-oc apply -f 21-app-deployment.yaml
-oc apply -f 22-app-service.yaml
-oc apply -f 23-app-route.yaml
-# build/push image, then:
-oc rollout status deployment/demo-monolith -n observability-demo --timeout=180s
+# Operator uninstall (optional): delete subscriptions/csv in openshift-tempo-operator and openshift-opentelemetry-operator
 ```
 
 ---
 
-## Web Console Install Path (summary)
+## Apply All (operators + stack + app plumbing)
 
-### Tempo Operator (OperatorHub)
+From the repository root (adjust paths if needed):
 
-1. **Administrator** perspective.  
-2. **Operators** → **OperatorHub**.  
-3. Search **`Tempo`** / **distributed tracing**.  
-4. Choose **Tempo Operator** (**Red Hat**).  
-5. **Install** → **All namespaces on the cluster** → installed namespace **`openshift-tempo-operator`** → channel **`stable`** → approval **Automatic** → **Install**.
-
-### Red Hat build of OpenTelemetry Operator (OperatorHub)
-
-1. **Operators** → **OperatorHub**.  
-2. Search **`Red Hat build of OpenTelemetry`**.  
-3. **Install** → **All namespaces** → **`openshift-opentelemetry-operator`** → channel **`stable`** → **Automatic** → **Install**.
-
-### Post-install custom resources (still YAML/CLI)
-
-- Create **`TempoMonolithic`** in **`observability-demo`**: `oc apply -f 10-tempo.yaml`  
-- Create **`OpenTelemetryCollector`**: `oc apply -f 11-otel-collector.yaml`  
-- Deploy app: `oc apply -f 20-app-configmap.yaml` … `23-app-route.yaml`  
-- Build/push image and wait for **`demo-monolith`** rollout.
-
-### What remains better as YAML after operators
-
-- **`TempoMonolithic`** / **`OpenTelemetryCollector`** (repeatable, Git-friendly).  
-- **Application `Deployment`/`Service`/`Route`** (GitOps-ready).  
-- **Labels, resource requests/limits, probes**, and **Routes** for the app.
+```bash
+oc apply -f observability-demo-ocp418/00-namespace.yaml
+oc apply -f observability-demo-ocp418/01-operatorgroup.yaml
+oc apply -f observability-demo-ocp418/02-subscriptions.yaml
+# wait for CSVs Succeeded
+oc apply -f observability-demo-ocp418/10-tempo.yaml
+oc apply -f observability-demo-ocp418/11-otel-collector.yaml
+oc apply -f observability-demo-ocp418/20-app-imagestream.yaml
+oc apply -f observability-demo-ocp418/21-app-buildconfig.yaml
+oc apply -f observability-demo-ocp418/22-app-configmap.yaml
+oc apply -f observability-demo-ocp418/24-app-service.yaml
+oc apply -f observability-demo-ocp418/25-app-route.yaml
+```
 
 ---
 
-## Cluster-scoped vs namespace-scoped (reference)
+## Build and Deploy App
 
-| Resource | Scope | Namespace / notes |
-|----------|-------|-------------------|
-| `Namespace` | cluster | `openshift-tempo-operator`, `openshift-opentelemetry-operator`, `observability-demo` |
-| `OperatorGroup` | namespaced | operator install namespaces |
-| `Subscription` | namespaced | operator install namespaces |
-| `ClusterServiceVersion` | namespaced | created by OLM in operator namespaces |
-| `TempoMonolithic` | namespaced | `observability-demo` |
-| `OpenTelemetryCollector` | namespaced | `observability-demo` |
-| `Deployment`/`Service`/`Route` | namespaced | `observability-demo` |
-
-No **Helm**, **Argo CD**, **PVC**, **StatefulSet-with-PVC**, or **PV** objects are used in this package.
+```bash
+oc start-build demo-monolith -n observability-demo --follow
+oc get builds -n observability-demo
+oc describe is demo-monolith -n observability-demo
+oc apply -f observability-demo-ocp418/23-app-deployment.yaml
+oc rollout status deployment/demo-monolith -n observability-demo --timeout=300s
+oc get route demo-monolith -n observability-demo
+```
 
 ---
 
-*Document generated for educational / lab use on **OpenShift Container Platform 4.18**. Operator CRD field names and exact Route service names may vary slightly by z-stream; use `oc get` / `oc explain` as the authoritative check on your cluster.*
+## Web Console Install Path (operators)
+
+- **Tempo Operator**: **Administrator** → **Operators** → **OperatorHub** → search **Tempo** → **Install** → **All namespaces** → namespace **`openshift-tempo-operator`** → **stable** → **Automatic**.  
+- **Red Hat build of OpenTelemetry Operator**: **OperatorHub** → search **Red Hat build of OpenTelemetry** → **Install** → **`openshift-opentelemetry-operator`** → **stable** → **Automatic**.  
+- After operators succeed, apply **`10-tempo.yaml`**, **`11-otel-collector.yaml`**, and the **app** manifests as above; start the **BuildConfig** from **Builds** → **BuildConfigs** → **demo-monolith**.
+
+---
+
+## OpenTelemetry in Code (concise)
+
+- **Deps**: `micrometer-tracing-bridge-otel` + `opentelemetry-exporter-otlp` in **`pom.xml`**.  
+- **Export**: Spring Boot **Micrometer → OpenTelemetry** bridge sends traces to **`MANAGEMENT_OTLP_TRACING_ENDPOINT`** (OTLP HTTP) → **`otel-collector.observability-demo.svc.cluster.local:4318`**.  
+- **Spans**: **Auto** for MVC + `RestClient`; **manual** `OrderService.getOrder` via **`Tracer`** from **`OpenTelemetryConfig`**.  
+- **Downstream**: Collector **OTLP gRPC** to **`tempo-demo.observability-demo.svc.cluster.local:4317`**; **Jaeger UI** Route queries Tempo.
+
+---
+
+*Lab uses **no Helm**, **no Argo CD**, **no PVCs**. Traces in Tempo monolithic memory are **ephemeral** (lost on pod restart).*

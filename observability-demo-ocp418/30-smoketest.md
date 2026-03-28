@@ -1,5 +1,21 @@
 # Smoke test — Observability demo (OCP 4.18)
 
+## 0. Build finished
+
+```bash
+oc get builds -n observability-demo
+oc logs -n observability-demo build/demo-monolith-1 --tail=50
+```
+
+(Replace `demo-monolith-1` with your latest build name from `oc get builds`.)  
+Expected: build phase **Complete**.
+
+```bash
+oc describe is demo-monolith -n observability-demo
+```
+
+Expected: tag **1.0.0** points at an image (digest populated).
+
 ## 1. Application HTTP
 
 ```bash
