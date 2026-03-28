@@ -35,6 +35,11 @@ spec:
       script: |
         #!/bin/sh
         set -eu
+        # Writable HOME for gitconfig; safe.directory avoids "dubious ownership" when workspace
+        # UID differs from the step user (Tekton emptyDir / fsGroup).
+        export HOME=/tmp/git-home
+        mkdir -p "$HOME"
+        git config --global --add safe.directory '*'
         cd "$(workspaces.output.path)"
         rm -rf ./* ./.??* 2>/dev/null || true
         git clone "$(params.url)" .
