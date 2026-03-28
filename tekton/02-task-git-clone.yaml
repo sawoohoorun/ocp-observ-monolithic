@@ -26,7 +26,7 @@ spec:
       type: string
       default: main
   workspaces:
-    - name: output
+    - name: source
       description: Empty workspace; repository root is placed here
   steps:
     - name: clone
@@ -40,8 +40,10 @@ spec:
         export HOME=/tmp/git-home
         mkdir -p "$HOME"
         git config --global --add safe.directory '*'
-        cd "$(workspaces.output.path)"
+        cd "$(workspaces.source.path)"
         rm -rf ./* ./.??* 2>/dev/null || true
         git clone "$(params.url)" .
         git checkout "$(params.revision)"
+        # Later TaskRuns use a different random UID; loosen perms so verify/apply steps can read.
+        chmod -R a+rX .
         echo "Cloned $(params.url) at $(git rev-parse --short HEAD)"

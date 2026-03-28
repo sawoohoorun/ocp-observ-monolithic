@@ -77,6 +77,8 @@ The clone step sets **`HOME=/tmp/git-home`** and **`git config --global safe.dir
 
 A Tekton line such as **`unsuccessful cred copy: ".docker" … mkdir /.docker: permission denied`** is **harmless** for public HTTPS clones (non-root cannot write `/`); ignore it or use a cluster without Docker-credential copy into the step.
 
+The clone task ends with **`chmod -R a+rX .`** so the next **TaskRun** (different random UID) can read the shared workspace; without that, **`verify-repo-layout`** may report **`missing frontend-ui/`** even after a successful clone.
+
 ## Pod Security Admission (restricted)
 
 Tasks set **`stepTemplate.securityContext`** (`capabilities.drop: ["ALL"]`, **`runAsNonRoot: true`**, **`seccompProfile: RuntimeDefault`**) and the **Pipeline** / sample **PipelineRun** set **`taskRunTemplate.podTemplate.securityContext`**. The clone step no longer runs **`dnf`** as root. If **Tekton entrypoint** init containers still violate **restricted** on your operator version, upgrade **OpenShift Pipelines** or configure **`TektonConfig` `default-pod-template`** — see **Troubleshooting Tekton Pipeline** in **`OCP-4.18-Observability-Demo-Deployment.md`**.
