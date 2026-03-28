@@ -321,7 +321,8 @@ openshift/
 tekton/
 ├── 00-serviceaccount.yaml
 ├── 01-rbac.yaml
-├── 02-task-git-clone.yaml … 07-task-emit-summary.yaml
+├── 02-task-prepare-demo-repo-and-apply.yaml
+├── 05-task-oc-start-build.yaml … 07-task-emit-summary.yaml
 ├── 10-pipeline.yaml
 ├── 11-pipelinerun.yaml
 ├── 20-task-smoketest.yaml
@@ -671,16 +672,13 @@ Manifests and tasks live under **`tekton/`**; see **`tekton/README.md`** for a c
 
 **Pipeline execution stages (ordered)**
 
-1. Clone source into workspace.  
-2. Verify repo contains **`frontend-ui/`**, **`backend-app/`**, **`openshift/`** (and key YAML files).  
-3. **Apply** Postgres manifest from clone → **wait** for `postgres` rollout.  
-4. **Apply** app `BuildConfig` / `Service` / `Deployment` / `Route` manifests from clone (no operators).  
-5. **Build backend** (`oc start-build backend-app --wait`).  
-6. **Wait** for **backend** `Deployment` rollout.  
-7. **Build frontend** (`oc start-build frontend-ui --wait`).  
-8. **Wait** for **frontend** `Deployment` rollout.  
-9. **Smoke test** (in-cluster HTTP to frontend `Service`).  
-10. **`finally`:** print **Routes**, **ImageStreamTag** hints, and **Jaeger UI** verification reminders.
+1. **One `TaskRun` (single pod):** clone into workspace → verify **`frontend-ui/`**, **`backend-app/`**, **`openshift/`** → **apply** Postgres → **wait** `postgres` rollout → **apply** app `BuildConfig` / `Service` / `Deployment` / `Route` YAML (no operators). *Same pod avoids PSA **restricted** cross-pod workspace read failures.*  
+2. **Build backend** (`oc start-build backend-app --wait`).  
+3. **Wait** for **backend** `Deployment` rollout.  
+4. **Build frontend** (`oc start-build frontend-ui --wait`).  
+5. **Wait** for **frontend** `Deployment` rollout.  
+6. **Smoke test** (in-cluster HTTP to frontend `Service`).  
+7. **`finally`:** print **Routes**, **ImageStreamTag** hints, and **Jaeger UI** verification reminders.
 
 **Pipeline outputs**
 
@@ -694,11 +692,8 @@ Manifests and tasks live under **`tekton/`**; see **`tekton/README.md`** for a c
 ```mermaid
 flowchart TD
   Dev[Developer push / manual start] --> PR[PipelineRun]
-  PR --> Clone[Clone monorepo]
-  Clone --> Verify[Verify frontend-ui backend-app openshift]
-  Verify --> ApplyPG[Apply postgres YAML wait rollout]
-  ApplyPG --> ApplyApp[Apply BC Deploy Route from Git]
-  ApplyApp --> BB[oc start-build backend-app]
+  PR --> Prep[prepare: clone verify apply — one pod]
+  Prep --> BB[oc start-build backend-app]
   BB --> WB[rollout backend-app]
   WB --> BF[oc start-build frontend-ui]
   BF --> WF[rollout frontend-ui]
@@ -714,13 +709,13 @@ flowchart TD
 |----------|----------------|---------|
 | `ServiceAccount` | `observability-demo-pipeline` | Identity for all `TaskRun` pods |
 | `Role` + `RoleBinding` | `observability-demo-pipeline` | Namespace permissions for builds, deployments, routes, imagestreams, secrets/configmaps needed for apply |
-| `Task` | `git-clone-demo-repo`, `verify-demo-repo-layout`, `apply-openshift-app-manifests`, `oc-start-build-wait`, `oc-rollout-status`, `frontend-smoke-test`, `emit-delivery-summary` | Reusable steps |
+| `Task` | `prepare-demo-repo-and-apply` (clone + verify + apply in **one pod**), `oc-start-build-wait`, `oc-rollout-status`, `frontend-smoke-test`, `emit-delivery-summary` | Reusable steps |
 | `Pipeline` | `observability-demo-delivery` | Ordered DAG + `finally` summary |
 | `PipelineRun` | e.g. `observability-demo-delivery-xxxxx` | One execution; binds workspace and parameters |
 | Workspace | `source` | Clone + `oc apply -f` paths under `$(workspaces.source.path)/openshift` |
 | Secrets (optional) | Git credentials | Only if `git-url` is private — attach to `ServiceAccount` or use a `git-clone` pattern with secret volume |
 
-**Bundled / catalog tasks:** This lab uses **custom Tasks** in `tekton/` (UBI + `git`, **`registry.redhat.io/openshift4/ose-cli`** for `oc`) so you are not tied to a specific **Tekton Hub** resolver version. Conceptually they replace bundles such as **`git-clone`** + **`openshift-client`** ClusterTasks — same ideas, fewer moving parts for a fresh cluster.
+**Bundled / catalog tasks:** This lab uses **custom Tasks** in `tekton/` (**`alpine/git`**, **`registry.redhat.io/openshift4/ose-cli`** for `oc`) so you are not tied to a specific **Tekton Hub** resolver version. Conceptually they replace bundles such as **`git-clone`** + **`openshift-client`** ClusterTasks — same ideas, fewer moving parts for a fresh cluster.
 
 **SCC / elevation:** Tasks run as **normal pods** in **`observability-demo`** using the pipeline **`ServiceAccount`**. **No custom SCC** or cluster-admin is required for the sample RBAC. If your cluster enforces **restricted** defaults, the stock `ose-cli` and UBI images are typically compatible; if pull fails, mirror images and edit task `image:` fields.
 
@@ -758,9 +753,7 @@ flowchart TD
 
 | Task | Role |
 |------|------|
-| `git-clone-demo-repo` | Clone `git-url` / `git-revision` into workspace |
-| `verify-demo-repo-layout` | Fail if expected directories / files are missing |
-| `apply-openshift-app-manifests` | `oc apply` **`40-postgres`** → **rollout** `postgres`; then **`20–23`**, **`30–32`** app manifests (tracing env preserved from Git) |
+| `prepare-demo-repo-and-apply` | **Single TaskRun:** clone → verify layout → `oc apply` **`40-postgres`** + rollout → `oc apply` app **`20–23`**, **`30–32`** (same pod avoids cross-pod workspace UID issues under PSA **restricted**) |
 | `oc-start-build-wait` | **Option A** — `oc start-build <bc> --wait --follow` (optional `--commit`) |
 | `oc-rollout-status` | `oc rollout status deployment/<name>` |
 | `frontend-smoke-test` | `curl` **readiness** and **`/action/order/ORD-001`** against **`http://frontend-ui.<ns>.svc.cluster.local:8080`**; optional **collector** log grep |
@@ -809,7 +802,7 @@ tkn pipeline start observability-demo-delivery -n observability-demo \
 
 ### Observability-Aware CI/CD (tracing preserved)
 
-1. **OTEL-related env / ConfigMaps:** **`apply-openshift-app-manifests`** reapplies **`openshift/21-ui-deployment.yaml`** and **`openshift/31-backend-deployment.yaml`**, which already set **`MANAGEMENT_OTLP_TRACING_ENDPOINT`** and sampling. **ConfigMap-only** OTLP config is not used in this demo; env vars are the source of truth. Re-applying those files after each clone keeps **pipeline-driven deploys** aligned with Git.  
+1. **OTEL-related env / ConfigMaps:** The **`prepare-demo-repo-and-apply`** task reapplies **`openshift/21-ui-deployment.yaml`** and **`openshift/31-backend-deployment.yaml`**, which already set **`MANAGEMENT_OTLP_TRACING_ENDPOINT`** and sampling. **ConfigMap-only** OTLP config is not used in this demo; env vars are the source of truth. Re-applying those files after each clone keeps **pipeline-driven deploys** aligned with Git.  
 2. **Frontend tracing config:** Preserved because the **Deployment** manifest in Git carries **`MANAGEMENT_OTLP_TRACING_ENDPOINT`**, **`MANAGEMENT_TRACING_SAMPLING_PROBABILITY`**, and **`DEMO_BACKEND_BASE_URL`**.  
 3. **Backend tracing config:** Same pattern for OTLP env; **`DB_PASSWORD`** remains **`secretKeyRef`**.  
 4. **Distinct service names:** **`spring.application.name`** stays **`frontend-ui`** vs **`backend-app`** in each app’s source; rebuilding images does not change that contract.  
@@ -855,9 +848,8 @@ tkn pipeline start observability-demo-delivery -n observability-demo \
 ```bash
 oc apply -f tekton/00-serviceaccount.yaml
 oc apply -f tekton/01-rbac.yaml
-oc apply -f tekton/02-task-git-clone.yaml
-oc apply -f tekton/03-task-verify-repo-layout.yaml
-oc apply -f tekton/04-task-apply-openshift-apps.yaml
+oc delete task git-clone-demo-repo verify-demo-repo-layout apply-openshift-app-manifests -n observability-demo --ignore-not-found
+oc apply -f tekton/02-task-prepare-demo-repo-and-apply.yaml
 oc apply -f tekton/05-task-oc-start-build.yaml
 oc apply -f tekton/06-task-oc-rollout-status.yaml
 oc apply -f tekton/07-task-emit-summary.yaml
@@ -903,7 +895,8 @@ The **`observability-demo-pipeline`** `Role` grants **namespace-scoped** verbs t
 | Symptom | Likely cause / action |
 |---------|------------------------|
 | **PodSecurity `restricted`** / **`prepare`**, **`place-scripts`**, **`step-*` forbidden** | Tasks use **`stepTemplate`** + **`podTemplate`** (`runAsNonRoot`, `seccompProfile`); clone/smoke use **non-root** images (`alpine/git`, `curlimages/curl`). If **init** containers still fail, upgrade **OpenShift Pipelines**, or set **`TektonConfig`** `spec.pipeline.default-pod-template` (operator), or relax **`pod-security.kubernetes.io/enforce`** for the namespace (last resort). |
-| **Git clone** fails | Wrong URL; private repo without **Secret** / **ServiceAccount** linkage; cluster egress blocked; **`docker.io` blocked** (mirror **`alpine/git`** or edit **`02-task-git-clone.yaml`**) |
+| **Git clone** fails | Wrong URL; private repo without **Secret** / **ServiceAccount** linkage; cluster egress blocked; **`docker.io` blocked** (mirror **`alpine/git`** or edit **`02-task-prepare-demo-repo-and-apply.yaml`**) |
+| **`missing frontend-ui/`** after clone | Usually **cross-pod workspace** + **PSA restricted** (different UIDs cannot traverse the volume). This repo uses **one Task** for clone + verify + apply so the workspace stays in the **same pod**; delete legacy **`git-clone-demo-repo`** / **`verify-demo-repo-layout`** Tasks if still applied. |
 | **Workspace empty / permission denied** | Workspace not bound on `PipelineRun`; `emptyDir` vs PVC; check `tkn pipelinerun describe` |
 | **Frontend or backend build fails** | See **`oc logs build/…`**; Maven/Dockerfile error; Git ref missing for **`--commit`** |
 | **Image updated but Deployment unchanged** | **`image.openshift.io/triggers`** annotation missing or wrong tag; compare **`istag`** to **`Deployment` pod spec** |
@@ -919,7 +912,7 @@ The **`observability-demo-pipeline`** `Role` grants **namespace-scoped** verbs t
 
 - **Git webhook / TriggerTemplate / EventListener** to start `PipelineRun` on push.  
 - **Separate dev / stage namespaces** with promoted `ImageStreamTag` or `kustomize` overlays.  
-- **Approval task** (Slack/Manual gate) before **`apply-openshift-apps`** or before **`build-frontend`**.  
+- **Approval task** (Slack/Manual gate) before **`prepare-repo-and-apply`** or before **`build-frontend`**.  
 - **Extra CI stages:** **Maven test**, **lint**, **container scan** (`trivy`/`clair` Task) before deploy.  
 - **Rollback:** keep previous **`ImageStreamTag`** revision and `oc rollback deployment/…` runbook.  
 - **Path-scoped triggers:** only run **frontend** or **backend** build tasks when corresponding paths change (CEP / in-cluster interceptor or external CI).  

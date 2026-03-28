@@ -10,9 +10,7 @@ This folder contains a **demo-friendly** Tekton `Pipeline` that automates clone 
 |------|---------|
 | `00-serviceaccount.yaml` | `ServiceAccount` `observability-demo-pipeline` |
 | `01-rbac.yaml` | Namespace `Role` + `RoleBinding` (builds, deploys, routes, imagestreams, etc.) |
-| `02-task-git-clone.yaml` | Clone the monorepo into the shared workspace |
-| `03-task-verify-repo-layout.yaml` | Require `frontend-ui/`, `backend-app/`, key `openshift/*.yaml` |
-| `04-task-apply-openshift-apps.yaml` | `oc apply` Postgres + app BC/Deployment/Service/Route from clone (no operators) |
+| `02-task-prepare-demo-repo-and-apply.yaml` | **One Task:** git clone, verify layout, `oc apply` Postgres + app manifests (single pod — shared workspace) |
 | `05-task-oc-start-build.yaml` | `oc start-build --wait` for a `BuildConfig` |
 | `06-task-oc-rollout-status.yaml` | `oc rollout status` for a `Deployment` |
 | `07-task-emit-summary.yaml` | Print routes, `ImageStreamTag`s, Jaeger hints (`finally`) |
@@ -25,11 +23,11 @@ This folder contains a **demo-friendly** Tekton `Pipeline` that automates clone 
 From the repo root (after namespace and observability stack exist):
 
 ```bash
+oc delete task git-clone-demo-repo verify-demo-repo-layout apply-openshift-app-manifests -n observability-demo --ignore-not-found
+
 oc apply -f tekton/00-serviceaccount.yaml
 oc apply -f tekton/01-rbac.yaml
-oc apply -f tekton/02-task-git-clone.yaml
-oc apply -f tekton/03-task-verify-repo-layout.yaml
-oc apply -f tekton/04-task-apply-openshift-apps.yaml
+oc apply -f tekton/02-task-prepare-demo-repo-and-apply.yaml
 oc apply -f tekton/05-task-oc-start-build.yaml
 oc apply -f tekton/06-task-oc-rollout-status.yaml
 oc apply -f tekton/07-task-emit-summary.yaml
@@ -38,11 +36,7 @@ oc apply -f tekton/10-pipeline.yaml
 # Optional: oc apply -f tekton/11-pipelinerun.yaml
 ```
 
-Or apply the directory (same order is not guaranteed by `kubectl`/`oc` — prefer explicit order or `kubectl apply -f tekton/` once; if you hit ordering issues, apply in the sequence above).
-
-```bash
-oc apply -f tekton/
-```
+Or `oc apply -f tekton/` (apply **Pipeline** after **Tasks** if the first apply misses ordering).
 
 ## Start a run (`tkn`)
 
@@ -65,11 +59,11 @@ tkn pipelinerun logs -f <pipelinerun-name> -n observability-demo
 
 ## Private Git
 
-Create a `Secret` of type `kubernetes.io/basic-auth` or `kubernetes.io/ssh-auth`, link it to the `ServiceAccount` (`secrets` field), and use an SSH URL or HTTPS with credentials per your cluster’s Git documentation. The sample clone task uses a public HTTPS URL.
+Create a `Secret` of type `kubernetes.io/basic-auth` or `kubernetes.io/ssh-auth`, link it to the `ServiceAccount` (`secrets` field), and use an SSH URL or HTTPS with credentials per your cluster’s Git documentation. The sample clone step uses a public HTTPS URL.
 
 ## Images used by tasks
 
-Tasks pull **`registry.redhat.io/openshift4/ose-cli`**, **`docker.io/alpine/git`** (clone), **`docker.io/curlimages/curl`** (smoke HTTP), and **`registry.access.redhat.com/ubi9/ubi-minimal`** (verify). Ensure pulls are allowed, or mirror and edit the task YAML.
+Tasks pull **`registry.redhat.io/openshift4/ose-cli`**, **`docker.io/alpine/git`** (clone + verify steps), and **`docker.io/curlimages/curl`** (smoke HTTP). Ensure pulls are allowed, or mirror and edit the task YAML.
 
 ## Git “dubious ownership” / Tekton creds warning
 
@@ -77,11 +71,13 @@ The clone step sets **`HOME=/tmp/git-home`** and **`git config --global safe.dir
 
 A Tekton line such as **`unsuccessful cred copy: ".docker" … mkdir /.docker: permission denied`** is **harmless** for public HTTPS clones (non-root cannot write `/`); ignore it or use a cluster without Docker-credential copy into the step.
 
-The clone task runs **`chmod -R a+rX`** on **`frontend-ui`**, **`backend-app`**, and **`openshift`** only (not the workspace mount root, which often returns **Operation not permitted**). That lets the next **TaskRun** (different random UID) read those trees; without it, **`verify-repo-layout`** may report **`missing frontend-ui/`**.
+## Workspace sharing (why one Task for clone + verify + apply)
+
+Under **PSA restricted**, each **TaskRun** gets a **different random UID**. The workspace volume root is often **not** world-traversable, so a **separate** verify/apply pod could not read files written by the clone pod (**`missing frontend-ui/`** even after a good clone). **Clone, verify, and `oc apply` run in one Task** (four steps, one pod) so the workspace stays on the same UID. Later tasks (builds, rollouts, smoke) do not need the workspace.
 
 ## Pod Security Admission (restricted)
 
-Tasks set **`stepTemplate.securityContext`** (`capabilities.drop: ["ALL"]`, **`runAsNonRoot: true`**, **`seccompProfile: RuntimeDefault`**) and the **Pipeline** / sample **PipelineRun** set **`taskRunTemplate.podTemplate.securityContext`**. The clone step no longer runs **`dnf`** as root. If **Tekton entrypoint** init containers still violate **restricted** on your operator version, upgrade **OpenShift Pipelines** or configure **`TektonConfig` `default-pod-template`** — see **Troubleshooting Tekton Pipeline** in **`OCP-4.18-Observability-Demo-Deployment.md`**.
+Tasks set **`stepTemplate.securityContext`** (`capabilities.drop: ["ALL"]`, **`runAsNonRoot: true`**, **`seccompProfile: RuntimeDefault`**) and the **Pipeline** / sample **PipelineRun** set **`taskRunTemplate.podTemplate.securityContext`**. If **Tekton entrypoint** init containers still violate **restricted** on your operator version, upgrade **OpenShift Pipelines** or configure **`TektonConfig` `default-pod-template`** — see **Troubleshooting Tekton Pipeline** in **`OCP-4.18-Observability-Demo-Deployment.md`**.
 
 ## Workspace size
 

@@ -1,15 +1,16 @@
 ---
+# Single pod: clone + verify + oc apply — avoids Tekton workspace volume root not traversable
+# by other TaskRun UIDs under PSA restricted (chmod on subdirs is not enough).
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: apply-openshift-app-manifests
+  name: prepare-demo-repo-and-apply
   namespace: observability-demo
   labels:
     app.kubernetes.io/part-of: observability-demo
 spec:
   description: >
-    Idempotent apply of PostgreSQL and application BuildConfigs/Deployments/Services/Routes from the clone.
-    Does not apply operators, Tempo, or the collector (platform stack stays out of the pipeline).
+    Clone monorepo, verify layout, apply Postgres + app manifests (same pod / same workspace).
   stepTemplate:
     securityContext:
       allowPrivilegeEscalation: false
@@ -20,12 +21,43 @@ spec:
       seccompProfile:
         type: RuntimeDefault
   params:
+    - name: url
+      type: string
+    - name: revision
+      type: string
+      default: main
     - name: namespace
       type: string
       default: observability-demo
   workspaces:
     - name: source
   steps:
+    - name: clone
+      image: docker.io/alpine/git:v2.45.2
+      script: |
+        #!/bin/sh
+        set -eu
+        export HOME=/tmp/git-home
+        mkdir -p "$HOME"
+        git config --global --add safe.directory '*'
+        cd "$(workspaces.source.path)"
+        rm -rf ./* ./.??* 2>/dev/null || true
+        git clone "$(params.url)" .
+        git checkout "$(params.revision)"
+        echo "Cloned $(params.url) at $(git rev-parse --short HEAD)"
+    - name: verify-layout
+      image: docker.io/alpine/git:v2.45.2
+      script: |
+        #!/bin/sh
+        set -eu
+        ROOT="$(workspaces.source.path)"
+        test -d "${ROOT}/frontend-ui" || { echo "missing frontend-ui/"; exit 1; }
+        test -d "${ROOT}/backend-app" || { echo "missing backend-app/"; exit 1; }
+        test -d "${ROOT}/openshift" || { echo "missing openshift/"; exit 1; }
+        for f in 40-postgres.yaml 30-backend-buildconfig.yaml 31-backend-deployment.yaml 20-ui-buildconfig.yaml 21-ui-deployment.yaml; do
+          test -f "${ROOT}/openshift/${f}" || { echo "missing openshift/${f}"; exit 1; }
+        done
+        echo "Repository layout OK"
     - name: apply-and-wait-postgres
       image: registry.redhat.io/openshift4/ose-cli:latest
       script: |

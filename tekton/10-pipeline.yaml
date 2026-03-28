@@ -9,7 +9,8 @@ metadata:
 spec:
   description: >
     Clone monorepo, verify layout, apply app YAML (Postgres + BC + Deployments preserving OTLP env),
-    build backend then frontend via OpenShift BuildConfig, wait for rollouts, smoke test, print summary.
+    build backend then frontend via OpenShift BuildConfig, wait for rollouts, smoke test, summary.
+    Clone/verify/apply run in one Task (single pod) so the workspace is readable without cross-pod chmod/fsGroup.
   params:
     - name: git-url
       type: string
@@ -43,9 +44,9 @@ spec:
         seccompProfile:
           type: RuntimeDefault
   tasks:
-    - name: clone-repository
+    - name: prepare-repo-and-apply
       taskRef:
-        name: git-clone-demo-repo
+        name: prepare-demo-repo-and-apply
       workspaces:
         - name: source
           workspace: source
@@ -54,31 +55,12 @@ spec:
           value: $(params.git-url)
         - name: revision
           value: $(params.git-revision)
-
-    - name: verify-repo-layout
-      runAfter:
-        - clone-repository
-      taskRef:
-        name: verify-demo-repo-layout
-      workspaces:
-        - name: source
-          workspace: source
-
-    - name: apply-openshift-apps
-      runAfter:
-        - verify-repo-layout
-      taskRef:
-        name: apply-openshift-app-manifests
-      workspaces:
-        - name: source
-          workspace: source
-      params:
         - name: namespace
           value: $(params.namespace)
 
     - name: build-backend
       runAfter:
-        - apply-openshift-apps
+        - prepare-repo-and-apply
       taskRef:
         name: oc-start-build-wait
       params:
