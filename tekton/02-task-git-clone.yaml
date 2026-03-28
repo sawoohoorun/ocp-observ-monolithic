@@ -8,6 +8,15 @@ metadata:
     app.kubernetes.io/part-of: observability-demo
 spec:
   description: Clone the monorepo (frontend-ui, backend-app, openshift) into the shared workspace.
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   params:
     - name: url
       description: Git repository URL (HTTPS or SSH if cluster supports it)
@@ -21,15 +30,13 @@ spec:
       description: Empty workspace; repository root is placed here
   steps:
     - name: clone
-      image: registry.access.redhat.com/ubi9/ubi:latest
-      securityContext:
-        runAsNonRoot: false
+      # Git baked in; runs without root (required for PSA restricted / runAsNonRoot).
+      image: docker.io/alpine/git:v2.45.2
       script: |
-        #!/bin/bash
-        set -euo pipefail
+        #!/bin/sh
+        set -eu
         cd "$(workspaces.output.path)"
         rm -rf ./* ./.??* 2>/dev/null || true
-        dnf install -y git-core >/dev/null
         git clone "$(params.url)" .
         git checkout "$(params.revision)"
         echo "Cloned $(params.url) at $(git rev-parse --short HEAD)"

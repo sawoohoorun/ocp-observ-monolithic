@@ -36,6 +36,12 @@ spec:
   workspaces:
     - name: source
       description: Shared workspace holding the cloned repository
+  taskRunTemplate:
+    podTemplate:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
   tasks:
     - name: clone-repository
       taskRef:

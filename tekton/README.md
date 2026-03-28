@@ -69,7 +69,11 @@ Create a `Secret` of type `kubernetes.io/basic-auth` or `kubernetes.io/ssh-auth`
 
 ## Images used by tasks
 
-Tasks pull **`registry.redhat.io/openshift4/ose-cli`** and **`registry.access.redhat.com/ubi9/*`**. Ensure your namespace or global pull configuration allows these (or substitute mirrored equivalents and edit the task YAML).
+Tasks pull **`registry.redhat.io/openshift4/ose-cli`**, **`docker.io/alpine/git`** (clone), **`docker.io/curlimages/curl`** (smoke HTTP), and **`registry.access.redhat.com/ubi9/ubi-minimal`** (verify). Ensure pulls are allowed, or mirror and edit the task YAML.
+
+## Pod Security Admission (restricted)
+
+Tasks set **`stepTemplate.securityContext`** (`capabilities.drop: ["ALL"]`, **`runAsNonRoot: true`**, **`seccompProfile: RuntimeDefault`**) and the **Pipeline** / sample **PipelineRun** set **`taskRunTemplate.podTemplate.securityContext`**. The clone step no longer runs **`dnf`** as root. If **Tekton entrypoint** init containers still violate **restricted** on your operator version, upgrade **OpenShift Pipelines** or configure **`TektonConfig` `default-pod-template`** — see **Troubleshooting Tekton Pipeline** in **`OCP-4.18-Observability-Demo-Deployment.md`**.
 
 ## Workspace size
 

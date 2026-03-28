@@ -8,6 +8,15 @@ metadata:
     app.kubernetes.io/part-of: observability-demo
 spec:
   description: Wait until a Deployment reports a successful rollout (image triggers from ImageStreamTag).
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   params:
     - name: namespace
       type: string

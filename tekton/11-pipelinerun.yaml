@@ -13,6 +13,12 @@ spec:
     name: observability-demo-delivery
   taskRunTemplate:
     serviceAccountName: observability-demo-pipeline
+    # Helps Tekton entrypoint/init containers satisfy PSA restricted (with OpenShift Pipelines ≥ 1.14).
+    podTemplate:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
   params:
     - name: git-url
       value: https://github.com/sawoohoorun/ocp-observ-monolithic.git

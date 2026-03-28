@@ -10,6 +10,15 @@ spec:
   description: >
     Idempotent apply of PostgreSQL and application BuildConfigs/Deployments/Services/Routes from the clone.
     Does not apply operators, Tempo, or the collector (platform stack stays out of the pipeline).
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   params:
     - name: namespace
       type: string

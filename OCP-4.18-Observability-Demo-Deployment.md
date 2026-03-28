@@ -902,7 +902,8 @@ The **`observability-demo-pipeline`** `Role` grants **namespace-scoped** verbs t
 
 | Symptom | Likely cause / action |
 |---------|------------------------|
-| **Git clone** fails | Wrong URL; private repo without **Secret** / **ServiceAccount** linkage; cluster egress blocked |
+| **PodSecurity `restricted`** / **`prepare`**, **`place-scripts`**, **`step-*` forbidden** | Tasks use **`stepTemplate`** + **`podTemplate`** (`runAsNonRoot`, `seccompProfile`); clone/smoke use **non-root** images (`alpine/git`, `curlimages/curl`). If **init** containers still fail, upgrade **OpenShift Pipelines**, or set **`TektonConfig`** `spec.pipeline.default-pod-template` (operator), or relax **`pod-security.kubernetes.io/enforce`** for the namespace (last resort). |
+| **Git clone** fails | Wrong URL; private repo without **Secret** / **ServiceAccount** linkage; cluster egress blocked; **`docker.io` blocked** (mirror **`alpine/git`** or edit **`02-task-git-clone.yaml`**) |
 | **Workspace empty / permission denied** | Workspace not bound on `PipelineRun`; `emptyDir` vs PVC; check `tkn pipelinerun describe` |
 | **Frontend or backend build fails** | See **`oc logs build/…`**; Maven/Dockerfile error; Git ref missing for **`--commit`** |
 | **Image updated but Deployment unchanged** | **`image.openshift.io/triggers`** annotation missing or wrong tag; compare **`istag`** to **`Deployment` pod spec** |

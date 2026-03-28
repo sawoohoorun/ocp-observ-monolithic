@@ -8,6 +8,15 @@ metadata:
     app.kubernetes.io/part-of: observability-demo
 spec:
   description: Print routes, ImageStream tags, and manual Jaeger verification hints (typically used in a Pipeline finally block).
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   params:
     - name: namespace
       type: string

@@ -8,6 +8,15 @@ metadata:
     app.kubernetes.io/part-of: observability-demo
 spec:
   description: Run OpenShift binary build for a BuildConfig and wait for completion (Option A — cluster BuildConfig owns the image).
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   params:
     - name: namespace
       type: string

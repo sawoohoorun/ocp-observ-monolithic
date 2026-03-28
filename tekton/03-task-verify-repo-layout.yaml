@@ -8,6 +8,15 @@ metadata:
     app.kubernetes.io/part-of: observability-demo
 spec:
   description: Fail fast if frontend-ui, backend-app, or openshift/ are missing from the clone.
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   workspaces:
     - name: source
   steps:

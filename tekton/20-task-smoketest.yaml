@@ -10,6 +10,15 @@ spec:
   description: >
     In-cluster HTTP smoke against the frontend Service (after backend is ready).
     Jaeger trace shape (frontend-ui + backend-app + postgres SQL span) is validated manually in the UI.
+  stepTemplate:
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
   params:
     - name: namespace
       type: string
@@ -19,19 +28,16 @@ spec:
       default: frontend-ui
   steps:
     - name: http-smoke
-      image: registry.access.redhat.com/ubi9/ubi:latest
-      securityContext:
-        runAsNonRoot: false
+      image: docker.io/curlimages/curl:8.11.0
       script: |
-        #!/bin/bash
-        set -euo pipefail
-        dnf install -y curl-minimal >/dev/null
+        #!/bin/sh
+        set -eu
         NS="$(params.namespace)"
         SVC="$(params.frontend-service)"
         BASE="http://${SVC}.${NS}.svc.cluster.local:8080"
-        code_r=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}/actuator/health/readiness")
+        code_r=$(curl -sS -o /dev/null -w "%{http_code}" "${BASE}/actuator/health/readiness")
         test "${code_r}" = "200" || { echo "readiness HTTP ${code_r}"; exit 1; }
-        code_a=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}/action/order/ORD-001")
+        code_a=$(curl -sS -o /dev/null -w "%{http_code}" "${BASE}/action/order/ORD-001")
         test "${code_a}" = "200" || { echo "Get Order HTTP ${code_a}"; exit 1; }
         echo "OK: frontend readiness + Get Order returned HTTP 200"
     - name: collector-log-hints
