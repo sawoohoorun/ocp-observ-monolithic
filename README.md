@@ -36,7 +36,7 @@ flowchart LR
 
 | Layer | Workload | Responsibility |
 |-------|----------|----------------|
-| **1 — Frontend UI** | `frontend-ui` | Serves HTML with **Get Order / Check Inventory / Calculate Price** actions. Each action performs a **server-side** `RestClient` call to `backend-app` so **W3C `traceparent`** propagates on the outbound HTTP request. |
+| **1 — Frontend UI** | `frontend-ui` | Serves HTML with **Get Order / Check Inventory / Calculate Price** actions. Each action performs a **server-side** `RestClient` call to `backend-app` so **W3C `traceparent`** propagates and **one trace ID** spans UI + API + DB (**distinct `service.name`** per tier — see **Same Trace ID Across Frontend and Backend**). |
 | **2 — Backend monolith** | `backend-app` | REST `/api/...`, **controller** spans (auto), **service** spans (manual + business logic), **database client** spans (manual `SpanKind.CLIENT` around JPA reads + `db.*` attributes). |
 | **3 — Data** | `postgres` | Single non-HA **Deployment**, **`emptyDir`** data volume, **init SQL** via ConfigMap → `docker-entrypoint-initdb.d`. |
 
@@ -76,6 +76,65 @@ flowchart LR
 2. **frontend-ui → backend-app:** **`RestClient`** runs in the same request thread; Spring Boot observability injects **`traceparent`** (W3C) on the outbound request. The backend’s Tomcat creates a **child server span** linked to the same trace.
 3. **backend-app internal:** Service-layer manual spans and DB client spans attach **under** the backend HTTP span.
 4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`**.
+
+**Correlation contract:** One user action MUST yield **one trace ID** spanning **`frontend-ui`** and **`backend-app`** (distinct services in Jaeger). Full semantics, headers, and failure modes are in **Same Trace ID Across Frontend and Backend** below.
+
+---
+
+## Same Trace ID Across Frontend and Backend
+
+**Tracing consistency requirement (default):** When a user opens the UI and triggers an action such as **Get Order**, the **entire path** MUST stay in **one distributed trace**: **`frontend-ui`** spans and **`backend-app`** spans share the **same trace ID**. In Jaeger they MUST appear as **different services** — preferred resource names **`frontend-ui`** and **`backend-app`** — not merged into one service unless you deliberately follow **Optional: Force Frontend and Backend to Appear as the Same Service**. **PostgreSQL-related client spans** (e.g. **`SELECT orders`**) MUST remain in that **same trace**, typically as descendants of the backend HTTP span.
+
+**Implementation requirement:** Application code and runtime configuration MUST preserve **W3C Trace Context** end to end on the **frontend → backend** hop (at minimum **`traceparent`** injection on the outbound request and extraction on the inbound request). Any change that drops, rewrites, or bypasses that propagation breaks **single-trace** behavior.
+
+### 1. How the trace starts in the frontend
+
+This demo uses **server-side rendering (Thymeleaf)**. The browser performs a normal **HTTP GET** to **`frontend-ui`** (for example `/action/order/ORD-001`). **Distributed tracing starts in the frontend pod** (not in the browser): Spring Web / embedded Tomcat + Micrometer Observability create an **inbound HTTP server span** for that request, tagged with the **`frontend-ui`** OpenTelemetry **resource** / **`service.name`**.
+
+### 2. How trace context is propagated from frontend to backend
+
+The UI controller invokes **`RestClient`** to call **`backend-app`** during **the same synchronous request** that is already traced. Spring Boot **3.x** with **`micrometer-tracing-bridge-otel`** propagates the **current trace context** onto the outbound HTTP client call, so the child spans on the backend attach to the **same trace** as the frontend’s inbound span.
+
+### 3. Headers: `traceparent`, `tracestate`, and `baggage`
+
+| Mechanism | Role in this demo |
+|-----------|-------------------|
+| **`traceparent`** (W3C Trace Context) | **Required** on the wire for correlation. Carries **trace id**, **parent span id**, and **sampling** flags. The default **W3C propagator** injects it on **`RestClient`** and the backend server instrumentation **extracts** it. |
+| **`tracestate`** | **Optional** list of vendor-specific entries. May appear alongside **`traceparent`**. Its absence does **not** by itself indicate broken propagation. |
+| **W3C Baggage** | **Not used** in the default configuration. **Baggage** is for carrying arbitrary key/value context across services; it is separate from the trace id. You would only see baggage headers if you add an explicit **baggage propagator** — not required for **same trace ID**. |
+
+### 4. How the backend continues the existing trace instead of creating a new one
+
+**`backend-app`** Tomcat/Spring creates an **HTTP server span** for `/api/...` using the **extracted** context from the incoming request. That span’s **parent** is the propagated client span from **`frontend-ui`**, so the **trace id** matches. **Controller**, **service**, and **manual DB client** spans are created with the **same active context**, so they are **children** (direct or indirect) of that backend server span — **not** a new root trace.
+
+### 5. How Jaeger displays spans from multiple services in one trace
+
+In **Jaeger UI** (backed by **Tempo** here), opening a **trace** shows **all spans** for one **trace ID** in a single timeline / waterfall. Each span still shows its **service** (process) — e.g. **`frontend-ui`** for UI spans and **`backend-app`** for API and DB-related spans. **Multiple services inside one trace** is the **expected** shape for distributed tracing.
+
+### 6. Why same trace ID does not require the same service name
+
+**Trace ID** = one logical distributed operation. **`service.name`** = which component emitted a span. You want **one id** and **two (or more) services** so dependency and service filters stay meaningful. Collapsing both into one **`service.name`** is **optional** and generally **discouraged** (see below).
+
+### 7. Troubleshooting when frontend and backend create separate traces
+
+Use **Troubleshooting — distributed trace correlation** in the main **Troubleshooting** table. Typical causes: missing **`traceparent`** (stripped proxy, wrong client), **async** work without context propagation, **direct browser → backend** calls without a traced frontend hop, or **sampling** / exporter misconfiguration.
+
+---
+
+## Optional: Force Frontend and Backend to Appear as the Same Service
+
+**Default remains:** **same trace ID**, **different** **`service.name`** values (**`frontend-ui`** / **`backend-app`**), **one** trace including DB spans.
+
+If you **explicitly** want both tiers to show as **one service** in Jaeger (e.g. a simplified screenshot), you can set the **same** OpenTelemetry **`service.name`** resource in **both** applications — for example align **`spring.application.name`** (and any OTLP resource overrides) to a single value in **`frontend-ui`** and **`backend-app`**.
+
+**Tradeoffs (why this is usually NOT recommended):**
+
+- **Jaeger** and service graphs **no longer separate** frontend vs backend ownership.
+- **Service dependency** and **error attribution** views become **less useful**.
+- **On-call and troubleshooting** are harder because span process labels no longer match deployment boundaries.
+- **Distributed boundaries** (UI vs API) are **hidden** even though the trace id may still be correct.
+
+Use this **only** as a **demo shortcut**; revert to **distinct** **`service.name`** values for realistic observability.
 
 ---
 
@@ -129,7 +188,7 @@ The previous single **`spring-monolith`** tree was **removed** in favor of this 
 | **Layout** | Replaced single `spring-monolith` with **`frontend-ui/`** + **`backend-app/`** | Separate deployments, routes, and **`service.name`** values for Jaeger. |
 | **Manifests** | Moved to **`openshift/`** with numbered files (`20`–`40`) | Matches OpenShift-focused layout you requested. |
 | **Backend** | JPA + Postgres + manual **DB client spans** | Satisfy **Layer 3** visibility in Jaeger. |
-| **Frontend** | New Thymeleaf app + **`RestClient`** | **Layer 1** server span + **HTTP client** span to backend with **W3C** propagation. |
+| **Frontend** | New Thymeleaf app + **`RestClient`** | **Layer 1** server span + **HTTP client** span to backend with **W3C** propagation; **one trace ID** with **`backend-app`** (see **Same Trace ID Across Frontend and Backend**). |
 | **Postgres** | New `40-postgres.yaml` | Ephemeral DB with seed data; **no PVC**. |
 
 ---
@@ -267,31 +326,34 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 ## OpenTelemetry in Code
 
-### 1. Frontend UI tracing
+**W3C trace context:** Implementations MUST keep **W3C Trace Context** (**`traceparent`**) on the **UI → API** HTTP request. This repository uses Spring Boot + Micrometer OTel bridge defaults; do not replace **`RestClient`** with a raw client that omits context injection without also wiring **Observations** / propagators.
 
-- **Inbound:** Spring MVC / Tomcat creates a **server span** for each `/action/...` request (`frontend-ui`).
-- **Outbound:** **`RestClient`** is instrumented by Spring Boot 3 + Micrometer tracing; **`traceparent`** (W3C) is sent to **`backend-app`**. No browser JS instrumentation is required because the **browser only loads HTML**; tracing starts at the **frontend pod** when the user follows a link.
+### 1. Frontend UI tracing (server-side)
+
+- **Inbound HTTP:** Spring MVC / Tomcat creates a **server span** for each `/action/...` request; **`service.name`** = **`frontend-ui`** (`spring.application.name`).
+- **Outbound HTTP:** **`RestClient`** to **`backend-app`** MUST run with the **active trace** so Micrometer injects **`traceparent`** (and optional **`tracestate`**) on the outbound call. **Requirement:** use the **instrumented** **`RestClient`** bean pattern (see `ClientConfig` / `UiController`); avoid ad-hoc **`HttpURLConnection`** or third-party clients that ignore context.
+- **Browser:** This UI is **not** a SPA making direct traced XHR/fetch to the API. The **browser** only does a **full-page GET** to **`frontend-ui`**; the **trace starts in the frontend service** when that request hits the pod. **Browser-to-backend direct** calls would require **browser instrumentation** (e.g. OpenTelemetry JS) **and** CORS/header rules to propagate **`traceparent`** — **out of scope** for the default demo by design.
 
 ### 2. Backend app tracing
 
-- **Controller:** Auto **HTTP server** spans for `/api/...`.
-- **Service:** Manual spans **`OrderService.getOrder`**, **`InventoryService.checkStock`**, **`PricingService.getPrice`**.
-- **Repository / DB:** Manual **client** spans **`SELECT orders`**, **`SELECT inventory`**, **`SELECT pricing`** wrapping JPA calls, with **`db.system`**, **`db.statement`**, etc.
+- **Inbound HTTP:** MUST **extract** W3C context from headers and create the **server span** as a **child** of the frontend client span (Spring Boot server instrumentation does this when headers are present).
+- **Internal spans:** **Controller**, **service**, and **repository** layers MUST create spans **under** that server span (same trace id).
+- **Database:** Manual **CLIENT** spans for SQL (**`SELECT …`**) MUST use the **current** context so **Postgres-related spans** stay in the **same trace** as the HTTP request.
 
 ### 3. Database spans in Jaeger
 
 - Implemented as **OpenTelemetry client spans** (see **Database Span Visibility in Jaeger**). Hibernate may add additional internal spans depending on version; the manual spans are the **contract** for the lab.
 
-### 4. Trace propagation
+### 4. Trace propagation (recap)
 
-- **W3C Trace Context** on the HTTP call **frontend → backend** via Spring’s propagators.
-- **Single trace** should chain: frontend server → frontend client → backend server → service → DB client.
+- **W3C Trace Context** on **frontend → backend** via Spring’s default propagators.
+- **Single trace** chain: **frontend-ui** server → **frontend-ui** client → **backend-app** server → service → **DB client** (all **one trace id**).
 
 ### 5. Service naming
 
 - **`frontend-ui`** — `spring.application.name` in `frontend-ui`.
 - **`backend-app`** — `spring.application.name` in `backend-app`.
-- **Postgres-related spans** — same trace as backend; span attributes carry **`db.system=postgresql`** (resource/service still typically **`backend-app`** unless you add peer service attributes).
+- **Postgres-related spans** — same **trace id** as the backend HTTP span; **`service.name`** remains **`backend-app`** on those spans unless you add peer/resource overrides (see **Optional: Force Frontend and Backend to Appear as the Same Service** only if you intentionally unify names).
 
 **OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces` on both Deployments.
 
@@ -307,29 +369,33 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 ## Tracing Testing
 
-End-to-end validation checklist:
+**Goal:** Prove **one trace ID** for **one** UI action, with spans from **`frontend-ui`**, **`backend-app`**, and the **SQL client** span in the **same** Jaeger trace.
 
-1. **Open** the **`frontend-ui`** Route in a browser (`oc get route frontend-ui -n observability-demo`).
-2. **Click** **Get Order** (or Inventory / Price) — each click starts a **new trace**.
-3. **Open Jaeger UI** Route (same namespace); select service **`frontend-ui`** and/or **`backend-app`**.
-4. **Find** a trace matching the click time; root is often the **frontend** HTTP span.
-5. **Confirm spans:**
-   - **Frontend:** HTTP server for `/action/...`; HTTP **client** to `/api/...`.
-   - **Backend:** HTTP server for `/api/...`; **`OrderService.*`** / **`InventoryService.*`** / **`PricingService.*`**; **`SELECT ...`** **client** spans with **`db.system=postgresql`**.
-6. **Collector sanity:** `oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=80`.
-7. **If no traces:** See **Troubleshooting**; verify OTLP env on both Deployments, Collector + Tempo pods, and that Postgres is **Ready** before heavy backend traffic.
-8. **Load (optional):** repeat clicks or script `curl` against the **frontend** Route (session-less links).
+1. **Trigger exactly one UI action** — e.g. open **`frontend-ui`** Route (`oc get route frontend-ui -n observability-demo`) and click **Get Order** once (wait for the page to load). Each separate click creates a **new** trace; isolate **one** action for validation.
+2. **Open Jaeger UI** (Tempo-backed route in **`observability-demo`**).
+3. **Find that trace** — search by time window and/or service **`frontend-ui`** or **`backend-app`**.
+4. **Open the trace detail** and confirm the waterfall includes spans from **both** services:
+   - At least one span with **service** **`frontend-ui`** (inbound `/action/...` and outbound client to API).
+   - At least one span with **service** **`backend-app`** (inbound `/api/...` and internal work).
+5. **Confirm a single trace ID** — in the trace view, **every** span listed belongs to the **same** trace (Jaeger shows one **Trace ID** for the whole view; there must **not** be two unrelated traces for that single click).
+6. **Confirm the PostgreSQL-related span** — under **`backend-app`**, find a **client** span such as **`SELECT orders`** (or equivalent) with **`db.system=postgresql`**; it MUST appear **inside this same trace**, not in a second trace.
+7. **Interpretation:** **Multiple services** in **one** trace is **correct** distributed tracing behavior — **not** an error.
+
+**Additional checks:** **Collector:** `oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
+
+**Jaeger search tip:** Searching or filtering by **one** service only **limits which traces appear in the list**; opening a trace still shows **all** spans (all services) for that trace ID. If you only see one service in the **trace detail**, propagation is likely broken — see **Troubleshooting — distributed trace correlation**.
 
 ---
 
 ## UI Click Trace Testing
 
 1. Browse to **`https://<frontend-ui-route-host>/`**.
-2. Click **Get Order** → expect JSON-like payload for **`ORD-001`** on the result page.
-3. In Jaeger, find a trace where the **first span** is associated with **`frontend-ui`** and path **`/action/order/ORD-001`** (names may vary slightly by instrumentation).
-4. Expand children until you see **`backend-app`** **HTTP** span for **`GET /api/orders/ORD-001`**.
-5. Under that, confirm **service** + **`SELECT orders`** (or equivalent) span.
-6. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** (`SKU-100`).
+2. Click **Get Order** **once** → expect the result page for **`ORD-001`**.
+3. In Jaeger, open **one** trace for that moment in time.
+4. Verify **Trace ID** is shared: copy the trace id from the UI if available; confirm **all** listed spans use that id (no second trace for the same click).
+5. Verify **service** **`frontend-ui`**: root / server span for **`/action/order/ORD-001`** (names may vary slightly) and **client** span toward **`/api/orders/ORD-001`**.
+6. Verify **service** **`backend-app`**: **server** span for **`GET /api/orders/ORD-001`**, then **service** spans (**`OrderService.getOrder`** etc.), then **`SELECT orders`** (or equivalent) with **`db.system=postgresql`** — **all in this one trace**.
+7. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** — each click is a **new** trace; repeat steps 3–6 per action.
 
 ---
 
@@ -360,14 +426,14 @@ End-to-end validation checklist:
 
 ## Expected Trace Flow
 
-**One user click (e.g. Get Order):**
+**One user click (e.g. Get Order)** — **one trace ID** end to end:
 
 1. **frontend-ui** — Server span for `/action/order/ORD-001`.  
 2. **frontend-ui** — Client span → **backend-app** `/api/orders/ORD-001`.  
 3. **backend-app** — Server span for API.  
 4. **backend-app** — `OrderService.getOrder` + **`SELECT orders`** (DB client).  
 
-Minimum **three logical layers** visible: **UI pod**, **API pod**, **database client span**.
+Minimum **three logical layers** visible: **UI pod**, **API pod**, **database client span** — all under the **same Jaeger trace** with **two services** (**`frontend-ui`**, **`backend-app`**). See **Same Trace ID Across Frontend and Backend**.
 
 ---
 
@@ -376,11 +442,24 @@ Minimum **three logical layers** visible: **UI pod**, **API pod**, **database cl
 | Issue | Notes |
 |-------|--------|
 | Tempo apply **warnings** (multitenancy / `extraConfig`) | See earlier doc revision / Red Hat guidance; lab uses single-tenant **TempoMonolithic** + Jaeger OAuth on the UI Route. |
+| Postgres **ReplicaFailure** / SCC (`fsGroup` not allowed) | Do **not** set a fixed **`fsGroup`** outside the namespace range (e.g. `70` is rejected by **restricted-v2**). The manifest omits **`fsGroup`** so the platform assigns a valid group for **`emptyDir`**. |
 | Postgres **CrashLoop** on restricted SCC | Try adjusting **image** or **securityContext** per cluster policy; ensure **`emptyDir`** and `PGDATA` subpath as in `40-postgres.yaml`. |
 | **ImagePullBackOff** for `postgres:16-alpine` | Use an internal mirror or Red Hat image; update `40-postgres.yaml`. |
 | Backend **unready** | Postgres not ready, wrong password, or DB not initialized — check `oc logs deploy/backend-app`. |
 | **No DB spans** | Confirm backend image includes **manual** spans in services; check Jaeger for collapsed child spans. |
 | **`debug` exporter** errors on Collector | Switch **`debug`** → **`logging`** in `11-otel-collector.yaml` pipeline. |
+
+### Troubleshooting — distributed trace correlation
+
+| Issue | Notes |
+|-------|--------|
+| **Two traces** for one UI click (frontend one id, backend another) | **`traceparent`** not received by **`backend-app`**: check **`RestClient`** is the instrumented bean; compare with **Same Trace ID Across Frontend and Backend**. Confirm no **manual HTTP** bypassing Micrometer. |
+| **Headers not forwarded** | **Edge reverse proxy** / **API gateway** in front of UI or API must **forward** `traceparent` (and `tracestate` if used). OpenShift **Route** to the UI usually does not strip them; custom **Ingress** annotations or **corporate proxies** might. |
+| **`@Async` / reactive** breaks propagation | Context is **thread-local** / **Reactor**-scoped; async work must use **supported** context propagation (e.g. **`@Observed`**, **`ContextSnapshot`**, Reactor operators). This demo uses **sync** `RestClient` only. |
+| **Manual HTTP client** ignores propagation | **`HttpClient`**, raw **`RestTemplate`** without observation, or **Feign** without tracing deps may **omit** headers. Prefer **`RestClient`** + Boot observability or explicitly inject the **W3C propagator**. |
+| **Service names correct but traces split** | Not a naming issue — **exporter** or **sampling** edge cases (rare with probability `1.0`), or **two different requests** (double fetch, prefetch). Use **one** deliberate click and match **timestamps**. |
+| **Jaeger search by one service “hides” the other** | The **search list** filters **traces that contain** that service; opening a trace shows **all** spans. If the opened trace **only** shows **`frontend-ui`**, the backend never joined — see **headers not forwarded**. If the trace shows **both** services, behavior is **correct**. |
+| **Spans exist but DB span in “another” trace** | Usually **two separate HTTP requests** or backend **creating a new root** for DB work — verify manual spans use **current context** (this repo wraps JPA calls in the request thread). |
 
 ---
 
