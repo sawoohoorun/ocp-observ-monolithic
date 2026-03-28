@@ -74,8 +74,8 @@ spec:
         app.kubernetes.io/name: postgres
         app.kubernetes.io/part-of: observability-demo
     spec:
+      # Omit fsGroup so restricted-v2 can assign a namespace-allowed supplemental group (fixed GIDs e.g. 70 fail SCC).
       securityContext:
-        fsGroup: 70
         seccompProfile:
           type: RuntimeDefault
       containers:
