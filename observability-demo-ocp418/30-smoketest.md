@@ -1,5 +1,7 @@
 # Smoke test — Observability demo (OCP 4.18)
 
+For **Jaeger UI** steps (search service, traces, span hierarchy), use the **`Tracing Testing`** section in `OCP-4.18-Observability-Demo-Deployment.md` / `README.md`.
+
 ## 0. Build finished
 
 ```bash
