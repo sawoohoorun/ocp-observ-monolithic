@@ -2,10 +2,10 @@ apiVersion: opentelemetry.io/v1beta1
 kind: OpenTelemetryCollector
 metadata:
   name: otel
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
     app.kubernetes.io/name: otel-collector
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   mode: deployment
   replicas: 1
@@ -28,7 +28,7 @@ spec:
       batch: {}
     exporters:
       otlp/tempo:
-        endpoint: tempo-demo.observability-demo.svc.cluster.local:4317
+        endpoint: tempo-demo.observability-single-span.svc.cluster.local:4317
         tls:
           insecure: true
       debug:

@@ -3,9 +3,9 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: frontend-smoke-test
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   description: >
     In-cluster HTTP smoke against the frontend Service (after backend is ready).
@@ -22,7 +22,7 @@ spec:
   params:
     - name: namespace
       type: string
-      default: observability-demo
+      default: observability-single-span
     - name: frontend-service
       type: string
       default: frontend-ui

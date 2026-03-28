@@ -1,6 +1,6 @@
 # OpenShift 4.18 Observability Demo — 3-Layer App, Tempo, Collector & Jaeger UI
 
-> **Git branch `single-span`:** UI and API export traces as **one Jaeger service** (`order-demo-app`) with a unified span hierarchy — see **`docs/single-span-tracing.md`**.
+> **Git branch `single-span`:** Deploy into project **`observability-single-span`** (isolated from **`observability-demo`**). UI and API export traces as **one Jaeger service** (`order-demo-app`) — see **`docs/single-span-tracing.md`**.
 
 Guide to deploy a **three-layer traceable demo** on **OpenShift Container Platform 4.18**: **frontend UI** (Spring MVC + Thymeleaf), **backend monolith** (Spring Boot + JPA + PostgreSQL), **PostgreSQL** (ephemeral `emptyDir` only), plus **TempoMonolithic**, **Red Hat build of OpenTelemetry Collector**, and **Jaeger UI** (query against Tempo). Application images are built **in-cluster** via **`BuildConfig`** + Git. **No Helm, no Argo CD, no PVCs.**
 
@@ -48,7 +48,7 @@ flowchart LR
 
 - **Stack:** Spring Boot **3.4**, **Thymeleaf** (server-side rendering — no browser JS tracing required for the demo).
 - **Service name (this branch):** `spring.application.name: order-demo-app` → OTLP **`service.name`** **`order-demo-app`**.
-- **Outbound calls:** `RestClient` to `demo.backend-base-url` (overridden in-cluster by **`DEMO_BACKEND_BASE_URL`** → `http://backend-app.observability-demo.svc.cluster.local:8080`).
+- **Outbound calls:** `RestClient` to `demo.backend-base-url` (overridden in-cluster by **`DEMO_BACKEND_BASE_URL`** → `http://backend-app.observability-single-span.svc.cluster.local:8080`).
 - **User actions:** Links such as `/action/order/ORD-001`, `/action/inventory/SKU-100`, `/action/pricing/SKU-100` each trigger one backend round-trip and **one distributed trace** spanning UI + API + DB.
 
 ---
@@ -59,7 +59,7 @@ flowchart LR
 - **Service name (this branch):** **`order-demo-app`** (same resource as UI for Jaeger).
 - **APIs:** `GET /api/orders/{id}`, `GET /api/inventory/{sku}`, `GET /api/pricing/{sku}`.
 - **Layers:** `ApiController` → `OrderService` / `InventoryService` / `PricingService` → JPA repositories → PostgreSQL.
-- **DSN:** `jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb` with password from **`DB_PASSWORD`** (Secret).
+- **DSN:** `jdbc:postgresql://postgres.observability-single-span.svc.cluster.local:5432/demodb` with password from **`DB_PASSWORD`** (Secret).
 
 ---
 
@@ -77,7 +77,7 @@ flowchart LR
 1. **Browser → UI Deployment:** vanilla HTTP GET; Tomcat/Spring creates the **root SERVER** span (named e.g. **`app: user click get order`**) with **`service.name` `order-demo-app`**.
 2. **UI → API:** **`RestClient`** injects **`traceparent`**; backend Tomcat creates a **child SERVER** span for `/api/...` (same trace id, same **`order-demo-app`** process in Jaeger).
 3. **Backend internal:** **INTERNAL** business spans and **CLIENT** **`postgres: SELECT …`** attach under the API HTTP span.
-4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`**.
+4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces`**.
 
 **Correlation contract:** One user action MUST yield **one trace ID**. On branch **`single-span`**, both workloads export **`service.name` = `order-demo-app`** so Jaeger shows **one logical application** in the service list. Full span naming and verification: **`docs/single-span-tracing.md`**.
 
@@ -122,9 +122,9 @@ See **Troubleshooting — distributed trace correlation** in the main table: mis
 ## OCP 4.18 Assumptions
 
 - Connected cluster, **`redhat-operators`**, **OperatorHub** for Path B.
-- **`cluster-admin`** for operators and **`observability-demo`**.
+- **`cluster-admin`** for operators and **`observability-single-span`**.
 - Build pods: Git + Maven Central; app pods: pull **internal registry** + optional **docker.io** for Postgres.
-- **Restricted** PSA on `observability-demo` (manifests use non-root, dropped caps, `emptyDir` `/tmp` for Java apps).
+- **PSA** on `observability-single-span`: **`enforce: baseline`**, **`audit`/`warn: restricted`** (Tekton-friendly); app **`Deployment`s** use restricted-style `securityContext`.
 
 ---
 
@@ -192,7 +192,7 @@ openshift/
 
 | File | Purpose |
 |------|---------|
-| `00-namespace.yaml` | Operator + `observability-demo` namespaces. |
+| `00-namespace.yaml` | Operator + `observability-single-span` namespaces. |
 | `01-operatorgroup.yaml` | OperatorGroups for Tempo + OpenTelemetry operators. |
 | `02-subscriptions.yaml` | `tempo-product`, `opentelemetry-product` subscriptions. |
 | `10-tempo.yaml` | `TempoMonolithic` + **Jaeger UI Route** + memory storage. |
@@ -244,7 +244,7 @@ oc apply -f openshift/10-tempo.yaml
 oc apply -f openshift/11-otel-collector.yaml
 ```
 
-Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.enabled`). List routes: `oc get routes -n observability-demo`.
+Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.enabled`). List routes: `oc get routes -n observability-single-span`.
 
 ---
 
@@ -256,7 +256,7 @@ Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.
 
    ```bash
    oc apply -f openshift/40-postgres.yaml
-   oc rollout status deployment/postgres -n observability-demo --timeout=300s
+   oc rollout status deployment/postgres -n observability-single-span --timeout=300s
    ```
 
 2. **Register builds & start** (order flexible; backend is often built first):
@@ -264,16 +264,16 @@ Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.
    ```bash
    oc apply -f openshift/30-backend-buildconfig.yaml
    oc apply -f openshift/20-ui-buildconfig.yaml
-   oc start-build backend-app -n observability-demo --follow
-   oc start-build frontend-ui -n observability-demo --follow
+   oc start-build backend-app -n observability-single-span --follow
+   oc start-build frontend-ui -n observability-single-span --follow
    ```
 
 3. **Inspect:**
 
    ```bash
-   oc get builds -n observability-demo
-   oc describe is backend-app -n observability-demo
-   oc describe is frontend-ui -n observability-demo
+   oc get builds -n observability-single-span
+   oc describe is backend-app -n observability-single-span
+   oc describe is frontend-ui -n observability-single-span
    ```
 
 ---
@@ -283,14 +283,14 @@ Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.
 ```bash
 oc apply -f openshift/32-backend-service.yaml
 oc apply -f openshift/31-backend-deployment.yaml
-oc rollout status deployment/backend-app -n observability-demo --timeout=300s
+oc rollout status deployment/backend-app -n observability-single-span --timeout=300s
 
 oc apply -f openshift/22-ui-service.yaml
 oc apply -f openshift/23-ui-route.yaml
 oc apply -f openshift/21-ui-deployment.yaml
-oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
+oc rollout status deployment/frontend-ui -n observability-single-span --timeout=300s
 
-oc get route frontend-ui -n observability-demo -o jsonpath='{.spec.host}{"\n"}'
+oc get route frontend-ui -n observability-single-span -o jsonpath='{.spec.host}{"\n"}'
 ```
 
 Apply **Deployments only after** images exist (or expect short `ImagePullBackOff` until builds finish).
@@ -328,7 +328,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 - **Both pods:** **`order-demo-app`** via `spring.application.name` and **`management.opentelemetry.resource-attributes`**.
 - **Postgres-related spans** — same **trace id**; **`service.name`** **`order-demo-app`** (exported from the backend process).
 
-**OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces` on both Deployments.
+**OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces` on both Deployments.
 
 ---
 
@@ -336,7 +336,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 - Configured on **`TempoMonolithic`** in `openshift/10-tempo.yaml` (`jaegerui.enabled`, `route.enabled`).
 - **Jaeger UI does not store traces** here — it **queries Tempo**.
-- Access: **Route** in `observability-demo` (plus OAuth). Fallback: `oc port-forward` to the Jaeger UI / query **Service** if routes are restricted.
+- Access: **Route** in `observability-single-span` (plus OAuth). Fallback: `oc port-forward` to the Jaeger UI / query **Service** if routes are restricted.
 
 ---
 
@@ -347,12 +347,12 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 **Look for:** **`app: user click …`**, **`frontend: prepare request`**, **`backend: load order`** (or inventory/pricing equivalents), **`postgres: SELECT …`**.
 
 1. **Trigger exactly one UI action** — e.g. open the **`frontend-ui`** Route and click **Get Order** once.
-2. **Open Jaeger UI** (Tempo-backed route in **`observability-demo`**).
+2. **Open Jaeger UI** (Tempo-backed route in **`observability-single-span`**).
 3. **Service** = **`order-demo-app`** → **Find Traces** → open **one** trace.
 4. Confirm **one trace ID** for all spans and the parent/child shape in **`docs/single-span-tracing.md`**.
 5. Confirm **CLIENT** **`postgres: SELECT …`** with **`db.system=postgresql`** in the **same** trace.
 
-**Additional checks:** **Collector:** `oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
+**Additional checks:** **Collector:** `oc logs -n observability-single-span -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
 
 **Jaeger search tip:** With a single **`service.name`**, the service list shows **`order-demo-app`** once; the trace detail still shows the full span tree.
 
@@ -384,10 +384,10 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 | Goal | Command / action |
 |------|------------------|
 | Operators | `oc get csv -n openshift-tempo-operator` ; `oc get csv -n openshift-opentelemetry-operator` |
-| Tempo / Collector | `oc get tempomonolithic,pods,opentelemetrycollector -n observability-demo` |
-| Postgres | `oc get pods -l app.kubernetes.io/name=postgres -n observability-demo` ; `oc logs deploy/postgres -n observability-demo --tail=20` |
-| Backend | `oc get pods -l app.kubernetes.io/name=backend-app -n observability-demo` ; `curl -sS http://$(oc get svc backend-app -o jsonpath='{.spec.clusterIP}' -n observability-demo):8080/api/orders/ORD-001` from a debug pod or port-forward |
-| Frontend route | `oc get route frontend-ui -n observability-demo` |
+| Tempo / Collector | `oc get tempomonolithic,pods,opentelemetrycollector -n observability-single-span` |
+| Postgres | `oc get pods -l app.kubernetes.io/name=postgres -n observability-single-span` ; `oc logs deploy/postgres -n observability-single-span --tail=20` |
+| Backend | `oc get pods -l app.kubernetes.io/name=backend-app -n observability-single-span` ; `curl -sS http://$(oc get svc backend-app -o jsonpath='{.spec.clusterIP}' -n observability-single-span):8080/api/orders/ORD-001` from a debug pod or port-forward |
+| Frontend route | `oc get route frontend-ui -n observability-single-span` |
 | UI smoke | Browser: click all three actions |
 | Jaeger | **Tracing Testing** + **UI Click Trace Testing** |
 | Jaeger service | Filter **`order-demo-app`** |
@@ -446,7 +446,7 @@ oc delete -f openshift/20-ui-buildconfig.yaml --ignore-not-found
 oc delete -f openshift/40-postgres.yaml --ignore-not-found
 oc delete -f openshift/11-otel-collector.yaml --ignore-not-found
 oc delete -f openshift/10-tempo.yaml --ignore-not-found
-oc delete project observability-demo
+oc delete project observability-single-span
 ```
 
 ---
@@ -461,7 +461,7 @@ oc apply -f openshift/02-subscriptions.yaml
 oc apply -f openshift/10-tempo.yaml
 oc apply -f openshift/11-otel-collector.yaml
 oc apply -f openshift/40-postgres.yaml
-oc rollout status deployment/postgres -n observability-demo --timeout=300s
+oc rollout status deployment/postgres -n observability-single-span --timeout=300s
 oc apply -f openshift/30-backend-buildconfig.yaml
 oc apply -f openshift/20-ui-buildconfig.yaml
 ```
@@ -481,10 +481,10 @@ oc apply -f openshift/21-ui-deployment.yaml
 ## Build and Deploy App
 
 ```bash
-oc start-build backend-app -n observability-demo --follow
-oc start-build frontend-ui -n observability-demo --follow
-oc rollout status deployment/backend-app -n observability-demo --timeout=300s
-oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
+oc start-build backend-app -n observability-single-span --follow
+oc start-build frontend-ui -n observability-single-span --follow
+oc rollout status deployment/backend-app -n observability-single-span --timeout=300s
+oc rollout status deployment/frontend-ui -n observability-single-span --timeout=300s
 ```
 
 ---
@@ -508,7 +508,7 @@ Then apply **`openshift/10-tempo.yaml`**, **`11-otel-collector.yaml`**, and the 
 ## Tracing Test Quickstart
 
 ```bash
-HOST=$(oc get route frontend-ui -n observability-demo -o jsonpath='{.spec.host}')
+HOST=$(oc get route frontend-ui -n observability-single-span -o jsonpath='{.spec.host}')
 open "https://${HOST}/"
 # Click "Get Order", then open Jaeger UI route → service order-demo-app → Find Traces
 ```
@@ -517,7 +517,7 @@ open "https://${HOST}/"
 
 ## OpenTelemetry in Code (recap)
 
-- **frontend-ui** + **backend-app**: Micrometer **OTLP HTTP** → **`otel-collector.observability-demo.svc.cluster.local:4318`**.  
+- **frontend-ui** + **backend-app**: Micrometer **OTLP HTTP** → **`otel-collector.observability-single-span.svc.cluster.local:4318`**.  
 - **Propagation:** **W3C** on **RestClient** from UI to API.  
 - **DB:** **Manual** `SpanKind.CLIENT` spans with **`db.*`** attributes on **`backend-app`**.  
 - **Jaeger:** Queries **Tempo**; filter **`order-demo-app`** (this branch).

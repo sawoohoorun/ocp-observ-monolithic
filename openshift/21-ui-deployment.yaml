@@ -2,14 +2,14 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: frontend-ui
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
     app.kubernetes.io/name: frontend-ui
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
     app.kubernetes.io/component: ui
   annotations:
     image.openshift.io/triggers: |-
-      [{"from":{"kind":"ImageStreamTag","name":"frontend-ui:1.0.0","namespace":"observability-demo"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
+      [{"from":{"kind":"ImageStreamTag","name":"frontend-ui:1.0.0","namespace":"observability-single-span"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
 spec:
   replicas: 1
   selector:
@@ -19,7 +19,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: frontend-ui
-        app.kubernetes.io/part-of: observability-demo
+        app.kubernetes.io/part-of: observability-single-span
         app.kubernetes.io/component: ui
     spec:
       serviceAccountName: default
@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: image-registry.openshift-image-registry.svc:5000/observability-demo/frontend-ui:1.0.0
+          image: image-registry.openshift-image-registry.svc:5000/observability-single-span/frontend-ui:1.0.0
           imagePullPolicy: Always
           ports:
             - name: http
@@ -38,9 +38,9 @@ spec:
             - name: SERVER_PORT
               value: "8080"
             - name: DEMO_BACKEND_BASE_URL
-              value: "http://backend-app.observability-demo.svc.cluster.local:8080"
+              value: "http://backend-app.observability-single-span.svc.cluster.local:8080"
             - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
-              value: "http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces"
+              value: "http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces"
             - name: MANAGEMENT_TRACING_SAMPLING_PROBABILITY
               value: "1.0"
           readinessProbe:

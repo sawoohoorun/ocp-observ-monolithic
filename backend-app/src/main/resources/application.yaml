@@ -5,7 +5,7 @@ spring:
   application:
     name: order-demo-app
   datasource:
-    url: jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb
+    url: jdbc:postgresql://postgres.observability-single-span.svc.cluster.local:5432/demodb
     username: demo
     password: ${DB_PASSWORD:demo}
     hikari:
@@ -36,4 +36,4 @@ management:
       jdbc: true
   otlp:
     tracing:
-      endpoint: http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces
+      endpoint: http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces

@@ -3,9 +3,9 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: oc-rollout-status
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   description: Wait until a Deployment reports a successful rollout (image triggers from ImageStreamTag).
   stepTemplate:
@@ -20,7 +20,7 @@ spec:
   params:
     - name: namespace
       type: string
-      default: observability-demo
+      default: observability-single-span
     - name: deployment
       type: string
     - name: timeout

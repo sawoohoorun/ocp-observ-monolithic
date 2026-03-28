@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: observability-demo-delivery
-  namespace: observability-demo
+  name: observability-single-span-delivery
+  namespace: observability-single-span
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   description: >
     Clone monorepo, verify layout, apply app YAML (Postgres + BC + Deployments preserving OTLP env),
@@ -17,7 +17,7 @@ spec:
       description: Source repository URL for git clone
     - name: git-revision
       type: string
-      default: main
+      default: single-span
       description: Branch, tag, or commit to check out after clone
     - name: start-build-commit
       type: string
@@ -25,7 +25,7 @@ spec:
       description: If set, passed to oc start-build --commit for both builds (omit for branch tip builds)
     - name: namespace
       type: string
-      default: observability-demo
+      default: observability-single-span
     - name: backend-app-name
       type: string
       default: backend-app

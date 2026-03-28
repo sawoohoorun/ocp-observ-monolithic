@@ -3,19 +3,19 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: frontend-ui
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
     app.kubernetes.io/name: frontend-ui
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: frontend-ui
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
     app.kubernetes.io/name: frontend-ui
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   successfulBuildsHistoryLimit: 5
   failedBuildsHistoryLimit: 5
@@ -24,7 +24,7 @@ spec:
     type: Git
     git:
       uri: https://github.com/sawoohoorun/ocp-observ-monolithic.git
-      ref: main
+      ref: single-span
     contextDir: frontend-ui
   strategy:
     type: Docker

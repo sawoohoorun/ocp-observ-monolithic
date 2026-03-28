@@ -5,9 +5,9 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: prepare-demo-repo-and-apply
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   description: >
     Clone monorepo, verify layout, apply Postgres + app manifests (same pod / same workspace).
@@ -28,7 +28,7 @@ spec:
       default: main
     - name: namespace
       type: string
-      default: observability-demo
+      default: observability-single-span
   workspaces:
     - name: source
   steps:

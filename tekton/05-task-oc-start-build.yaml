@@ -3,9 +3,9 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: oc-start-build-wait
-  namespace: observability-demo
+  namespace: observability-single-span
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: observability-single-span
 spec:
   description: Run OpenShift binary build for a BuildConfig and wait for completion (Option A — cluster BuildConfig owns the image).
   stepTemplate:
@@ -20,7 +20,7 @@ spec:
   params:
     - name: namespace
       type: string
-      default: observability-demo
+      default: observability-single-span
     - name: buildconfig
       type: string
     - name: commit

@@ -8,13 +8,13 @@ This folder contains a **demo-friendly** Tekton `Pipeline` that automates clone 
 
 | File | Purpose |
 |------|---------|
-| `00-serviceaccount.yaml` | `ServiceAccount` `observability-demo-pipeline` |
+| `00-serviceaccount.yaml` | `ServiceAccount` `observability-single-span-pipeline` |
 | `01-rbac.yaml` | Namespace `Role` + `RoleBinding` (builds, deploys, routes, imagestreams, etc.) |
 | `02-task-prepare-demo-repo-and-apply.yaml` | **One Task:** git clone, verify layout, `oc apply` Postgres + app manifests (single pod — shared workspace) |
 | `05-task-oc-start-build.yaml` | `oc start-build --wait` for a `BuildConfig` |
 | `06-task-oc-rollout-status.yaml` | `oc rollout status` for a `Deployment` |
 | `07-task-emit-summary.yaml` | Print routes, `ImageStreamTag`s, Jaeger hints (`finally`) |
-| `10-pipeline.yaml` | `Pipeline` `observability-demo-delivery` |
+| `10-pipeline.yaml` | `Pipeline` `observability-single-span-delivery` |
 | `11-pipelinerun.yaml` | Example `PipelineRun` with `emptyDir` workspace |
 | `20-task-smoketest.yaml` | In-cluster HTTP smoke + optional collector log grep |
 
@@ -23,7 +23,7 @@ This folder contains a **demo-friendly** Tekton `Pipeline` that automates clone 
 From the repo root (after namespace and observability stack exist):
 
 ```bash
-oc delete task git-clone-demo-repo verify-demo-repo-layout apply-openshift-app-manifests -n observability-demo --ignore-not-found
+oc delete task git-clone-demo-repo verify-demo-repo-layout apply-openshift-app-manifests -n observability-single-span --ignore-not-found
 
 oc apply -f tekton/00-serviceaccount.yaml
 oc apply -f tekton/01-rbac.yaml
@@ -41,20 +41,20 @@ Or `oc apply -f tekton/` (apply **Pipeline** after **Tasks** if the first apply 
 ## Start a run (`tkn`)
 
 ```bash
-tkn pipeline ls -n observability-demo
-tkn pipeline start observability-demo-delivery -n observability-demo \
+tkn pipeline ls -n observability-single-span
+tkn pipeline start observability-single-span-delivery -n observability-single-span \
   --showlog \
   -w name=source,emptyDir="" \
   -p git-url=https://github.com/sawoohoorun/ocp-observ-monolithic.git \
   -p git-revision=main \
-  -p namespace=observability-demo
+  -p namespace=observability-single-span
 ```
 
 Follow logs for an existing run:
 
 ```bash
-oc get pipelineruns -n observability-demo
-tkn pipelinerun logs -f <pipelinerun-name> -n observability-demo
+oc get pipelineruns -n observability-single-span
+tkn pipelinerun logs -f <pipelinerun-name> -n observability-single-span
 ```
 
 ## Private Git
