@@ -1,0 +1,18 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: frontend-ui
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/name: frontend-ui
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  to:
+    kind: Service
+    name: frontend-ui
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

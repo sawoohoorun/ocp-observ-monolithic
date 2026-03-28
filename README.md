@@ -1,110 +1,155 @@
-# OpenShift 4.18 Observability Demo — Tempo, OpenTelemetry Collector, Spring Monolith & Jaeger UI
+# OpenShift 4.18 Observability Demo — 3-Layer App, Tempo, Collector & Jaeger UI
 
-Practical guide to deploy and **test distributed tracing** on **OpenShift Container Platform 4.18** using **Red Hat OpenShift distributed tracing (Tempo Operator)**, **Red Hat build of OpenTelemetry Operator**, an in-cluster **OpenTelemetry Collector**, and the **Spring Boot monolith** from **[github.com/sawoohoorun/ocp-observ-monolithic](https://github.com/sawoohoorun/ocp-observ-monolithic)**. Images are built **inside the cluster** (`BuildConfig` + Git). **No Helm, no Argo CD, no PVCs** — **ephemeral** storage only (`TempoMonolithic` memory backend, `emptyDir` where needed).
+Guide to deploy a **three-layer traceable demo** on **OpenShift Container Platform 4.18**: **frontend UI** (Spring MVC + Thymeleaf), **backend monolith** (Spring Boot + JPA + PostgreSQL), **PostgreSQL** (ephemeral `emptyDir` only), plus **TempoMonolithic**, **Red Hat build of OpenTelemetry Collector**, and **Jaeger UI** (query against Tempo). Application images are built **in-cluster** via **`BuildConfig`** + Git. **No Helm, no Argo CD, no PVCs.**
 
-Manifests live under `observability-demo-ocp418/` in the repository; this document describes **what they do** and **which commands to run**, without inlining every YAML file.
+Manifests live in **`openshift/`** in [github.com/sawoohoorun/ocp-observ-monolithic](https://github.com/sawoohoorun/ocp-observ-monolithic). This document describes **purpose**, **order of apply**, and **commands** — not full YAML dumps.
 
 ---
 
 ## Architecture Summary
 
-| Piece | Role |
-|-------|------|
-| **Tempo Operator** (`openshift-tempo-operator`) | Installs/manages Tempo custom resources. |
-| **OpenTelemetry Operator** (`openshift-opentelemetry-operator`) | Deploys `OpenTelemetryCollector` from CRs. |
-| **`TempoMonolithic`** (`observability-demo`) | Single-pod Tempo with **in-memory** trace storage (tmpfs, no PVC). Ingests OTLP (gRPC) from the Collector. |
-| **Jaeger UI** | Provided by the Tempo operator for `TempoMonolithic` when `spec.jaegerui` is enabled: the UI is a **query frontend** that talks to **Tempo’s query API** — traces are **stored in Tempo**, not in a separate Jaeger storage backend. |
-| **`OpenTelemetryCollector`** | Receives **OTLP/HTTP** from the app on `:4318`, exports **OTLP/gRPC** to Tempo’s distributor on `tempo-demo:4317`. |
-| **Spring monolith** | Emits traces via Micrometer + OTLP to the Collector; layered HTTP + manual spans (≥3 per request flow). |
-| **`BuildConfig` (Docker + Git)** | Clones this repo, builds with multi-stage `Dockerfile` + Maven Wrapper, pushes `ImageStreamTag` `demo-monolith:1.0.0`. |
-
 ```mermaid
 flowchart LR
-  subgraph app[Spring monolith]
-    A[OTLP HTTP exporter]
-  end
-  subgraph obs[observability-demo]
-    C[OTel Collector :4318]
-    T[Tempo monolithic :4317 ingest]
-    J[Jaeger UI Route]
-  end
-  A -->|POST /v1/traces| C
+  B[Browser]
+  F[frontend-ui Deployment]
+  A[backend-app Deployment]
+  P[(PostgreSQL emptyDir)]
+  C[OTel Collector]
+  T[Tempo monolithic]
+  J[Jaeger UI Route]
+  B -->|HTTPS Route| F
+  F -->|HTTP + traceparent| A
+  A -->|JDBC| P
+  F -->|OTLP HTTP :4318| C
+  A -->|OTLP HTTP :4318| C
   C -->|OTLP gRPC| T
+  B -->|HTTPS OAuth| J
   J -->|Query API| T
-  U[User / curl] -->|HTTPS Route| app
-  U2[Engineer] -->|HTTPS + OAuth| J
 ```
+
+- **Two OpenTelemetry producers** (`frontend-ui`, `backend-app`) → same **Collector** → **Tempo** → **Jaeger UI** (Tempo-backed query).
+- **PostgreSQL** stores demo rows only; traces are **not** in Postgres.
+
+---
+
+## Upgraded 3-Layer Application Architecture
+
+| Layer | Workload | Responsibility |
+|-------|----------|----------------|
+| **1 — Frontend UI** | `frontend-ui` | Serves HTML with **Get Order / Check Inventory / Calculate Price** actions. Each action performs a **server-side** `RestClient` call to `backend-app` so **W3C `traceparent`** propagates on the outbound HTTP request. |
+| **2 — Backend monolith** | `backend-app` | REST `/api/...`, **controller** spans (auto), **service** spans (manual + business logic), **database client** spans (manual `SpanKind.CLIENT` around JPA reads + `db.*` attributes). |
+| **3 — Data** | `postgres` | Single non-HA **Deployment**, **`emptyDir`** data volume, **init SQL** via ConfigMap → `docker-entrypoint-initdb.d`. |
+
+---
+
+## Frontend UI Design
+
+- **Stack:** Spring Boot **3.4**, **Thymeleaf** (server-side rendering — no browser JS tracing required for the demo).
+- **Service name:** `spring.application.name: frontend-ui` → **`service.name`** in exported traces.
+- **Outbound calls:** `RestClient` to `demo.backend-base-url` (overridden in-cluster by **`DEMO_BACKEND_BASE_URL`** → `http://backend-app.observability-demo.svc.cluster.local:8080`).
+- **User actions:** Links such as `/action/order/ORD-001`, `/action/inventory/SKU-100`, `/action/pricing/SKU-100` each trigger one backend round-trip and **one distributed trace** spanning UI + API + DB.
+
+---
+
+## Backend Monolith Design
+
+- **Stack:** Spring Web, Actuator, **Data JPA**, **PostgreSQL** driver, **Micrometer tracing bridge → OTLP**.
+- **Service name:** `backend-app`.
+- **APIs:** `GET /api/orders/{id}`, `GET /api/inventory/{sku}`, `GET /api/pricing/{sku}`.
+- **Layers:** `ApiController` → `OrderService` / `InventoryService` / `PricingService` → JPA repositories → PostgreSQL.
+- **DSN:** `jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb` with password from **`DB_PASSWORD`** (Secret).
+
+---
+
+## PostgreSQL Demo Layer
+
+- **Image:** `docker.io/library/postgres:16-alpine` (if your cluster blocks Docker Hub, mirror or substitute a Red Hat–compatible image and update **`openshift/40-postgres.yaml`**).
+- **Storage:** **`emptyDir`** only at `/var/lib/postgresql/data` — data is **lost** when the pod is deleted.
+- **Bootstrap:** ConfigMap **`postgres-init`** mounted as **`/docker-entrypoint-initdb.d`**; creates `orders`, `inventory`, `pricing` and seeds **`ORD-001`**, **`SKU-100`**, etc.
+- **Credentials:** Secret **`postgres-secret`** (referenced by Deployment and backend).
+
+---
+
+## Cross-Service Trace Propagation
+
+1. **Browser → frontend-ui:** vanilla HTTP GET; Tomcat/Spring creates the **root server span** for `/action/...` on **`frontend-ui`**.
+2. **frontend-ui → backend-app:** **`RestClient`** runs in the same request thread; Spring Boot observability injects **`traceparent`** (W3C) on the outbound request. The backend’s Tomcat creates a **child server span** linked to the same trace.
+3. **backend-app internal:** Service-layer manual spans and DB client spans attach **under** the backend HTTP span.
+4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`**.
+
+---
+
+## Database Span Visibility in Jaeger
+
+- **Approach:** **Manual OpenTelemetry spans** (`SpanKind.CLIENT`) named e.g. **`SELECT orders`**, **`SELECT inventory`**, **`SELECT pricing`**, with attributes **`db.system=postgresql`**, **`db.statement`**, **`db.sql.table`**.
+- **Why manual:** Guarantees a **visible SQL-layer span** in Jaeger for lab validation. Pure JPA/Micrometer JDBC auto-instrumentation varies by version; if those spans appear **in addition**, they are a bonus.
+- **Missing DB spans:** If you see backend HTTP + service spans but **no** `SELECT *` client spans, check **`OrderService`** / **`InventoryService`** / **`PricingService`** in `backend-app` or verify the deployment is running the expected image.
 
 ---
 
 ## OCP 4.18 Assumptions
 
-- Connected cluster (or equivalent) with **`redhat-operators`** in `openshift-marketplace`.
-- **`cluster-admin`** (or equivalent) for operator install and project creation.
-- Build pods can reach **GitHub** (clone) and **Maven Central** (Maven Wrapper).
-- Pull access to **Red Hat registries** used in the `Dockerfile` (`registry.access.redhat.com/ubi9/openjdk-21`).
-- **OperatorHub** available in the web console for Path B.
+- Connected cluster, **`redhat-operators`**, **OperatorHub** for Path B.
+- **`cluster-admin`** for operators and **`observability-demo`**.
+- Build pods: Git + Maven Central; app pods: pull **internal registry** + optional **docker.io** for Postgres.
+- **Restricted** PSA on `observability-demo` (manifests use non-root, dropped caps, `emptyDir` `/tmp` for Java apps).
 
 ---
 
 ## Existing Source Code Assessment
 
-The demo application **is** this repository. The service is **`observability-demo-ocp418/spring-monolith/`**:
+The repository is the application source:
 
-- **Maven**, **Spring Boot 3.4.x**, **Java 21**.
-- **Entry API:** `GET /ui/orders/{id}` (`OrderController`).
-- **Business:** `OrderService.getOrder` with a **manual** OpenTelemetry span.
-- **Integration:** `InventoryClient` / `PricingClient` use **`RestClient`** against loopback internal APIs (`InternalApiController`) so **client + server** HTTP spans appear in the **same trace** with W3C propagation.
+- **`frontend-ui/`** — Thymeleaf UI + `RestClient` to backend.
+- **`backend-app/`** — REST API, JPA entities/repositories, traced services.
+- **`openshift/`** — All deploy/build/operator operand YAML for this demo.
 
-This satisfies a **monolith** with **at least three spans** (ingress + business + integration HTTP) in one trace.
+The previous single **`spring-monolith`** tree was **removed** in favor of this split.
 
 ---
 
 ## Repository Structure Summary
 
-- **`observability-demo-ocp418/*.yaml`** — Namespaced/cluster-scoped install and workload manifests.
-- **`observability-demo-ocp418/spring-monolith/`** — Application source (`pom.xml`, `Dockerfile`, `mvnw`, `src/...`).
-- **`observability-demo-ocp418/30-smoketest.md`** — Optional short checklist (build + HTTP + UI hints).
-- **`OCP-4.18-Observability-Demo-Deployment.md`** / **`README.md`** — This guide (kept aligned).
+```text
+├── backend-app/           # Maven, Spring Boot API + JPA
+├── frontend-ui/           # Maven, Spring Boot + Thymeleaf
+├── openshift/             # Namespaces, operators, Tempo, Collector, Postgres, builds, Deployments, Routes
+├── OCP-4.18-Observability-Demo-Deployment.md
+└── README.md              # kept in sync with this guide
+```
 
 ---
 
 ## What Changed in the Application Code
 
-| File / area | Change | Why |
-|-------------|--------|-----|
-| `spring-monolith/Dockerfile` | Multi-stage build; `microdnf install -y gzip tar` before `./mvnw` | OpenShift **Git + Docker** build has no `target/`; wrapper needs **gzip** to unpack Maven dist on slim UBI. |
-| `mvnw`, `.mvn/wrapper/` | Added Maven Wrapper | Reproducible **`./mvnw package`** inside the build container without yum-installed Maven. |
-| `spring-monolith/.s2i/environment` | `MAVEN_ARGS_APPEND=-DskipTests` | Optional **Source-to-Image** `BuildConfig` path only. |
-| Java / `pom.xml` / tracing | Baseline retained | Micrometer OTel bridge + OTLP exporter + manual `OrderService` span + `RestClient` instrumentation. |
-
-No replacement sample app — same codebase as the repo.
+| Area | Change | Why |
+|------|--------|-----|
+| **Layout** | Replaced single `spring-monolith` with **`frontend-ui/`** + **`backend-app/`** | Separate deployments, routes, and **`service.name`** values for Jaeger. |
+| **Manifests** | Moved to **`openshift/`** with numbered files (`20`–`40`) | Matches OpenShift-focused layout you requested. |
+| **Backend** | JPA + Postgres + manual **DB client spans** | Satisfy **Layer 3** visibility in Jaeger. |
+| **Frontend** | New Thymeleaf app + **`RestClient`** | **Layer 1** server span + **HTTP client** span to backend with **W3C** propagation. |
+| **Postgres** | New `40-postgres.yaml` | Ephemeral DB with seed data; **no PVC**. |
 
 ---
 
 ## File Tree
 
 ```text
-observability-demo-ocp418/
+openshift/
 ├── 00-namespace.yaml
 ├── 01-operatorgroup.yaml
 ├── 02-subscriptions.yaml
 ├── 10-tempo.yaml
 ├── 11-otel-collector.yaml
-├── 20-app-imagestream.yaml
-├── 21-app-buildconfig.yaml
-├── 22-app-configmap.yaml
-├── 23-app-deployment.yaml
-├── 24-app-service.yaml
-├── 25-app-route.yaml
-├── 30-smoketest.md
-└── spring-monolith/
-    ├── Dockerfile
-    ├── pom.xml
-    ├── mvnw
-    ├── .mvn/wrapper/
-    ├── .s2i/environment
-    └── src/main/...
+├── 20-ui-buildconfig.yaml      # ImageStream + BuildConfig (frontend-ui)
+├── 21-ui-deployment.yaml
+├── 22-ui-service.yaml
+├── 23-ui-route.yaml
+├── 30-backend-buildconfig.yaml # ImageStream + BuildConfig (backend-app)
+├── 31-backend-deployment.yaml
+├── 32-backend-service.yaml
+├── 40-postgres.yaml            # Secret, ConfigMap, Service, Deployment
+└── 30-smoketest.md
 ```
 
 ---
@@ -113,380 +158,309 @@ observability-demo-ocp418/
 
 | File | Purpose |
 |------|---------|
-| `00-namespace.yaml` | Creates `openshift-tempo-operator`, `openshift-opentelemetry-operator`, `observability-demo` (restricted PSA labels on demo NS). |
-| `01-operatorgroup.yaml` | Empty-spec `OperatorGroup` in each operator namespace (all-namespaces install pattern). |
-| `02-subscriptions.yaml` | OLM `Subscription` for `tempo-product` and `opentelemetry-product` (channel `stable`, `redhat-operators`). |
-| `10-tempo.yaml` | `TempoMonolithic` named `demo`: memory storage, **Jaeger UI + Route** enabled. |
-| `11-otel-collector.yaml` | `OpenTelemetryCollector` `otel`: OTLP in, export to `tempo-demo` gRPC, optional `debug` exporter. |
-| `20-app-imagestream.yaml` | `ImageStream` `demo-monolith` for build output. |
-| `21-app-buildconfig.yaml` | Git → `contextDir` `observability-demo-ocp418/spring-monolith`, **Docker** strategy, tag `demo-monolith:1.0.0`. |
-| `22-app-configmap.yaml` | Optional documentation ConfigMap (not mounted by default). |
-| `23-app-deployment.yaml` | `Deployment` for app: OTLP env, probes, `emptyDir` `/tmp`, image pull from internal registry + **ImageStream trigger** for `1.0.0`. |
-| `24-app-service.yaml` | `ClusterIP` Service port 8080. |
-| `25-app-route.yaml` | Edge TLS **Route** to the app. |
-| `30-smoketest.md` | Copy-paste checks for build, curl, collector logs, Tempo pod. |
+| `00-namespace.yaml` | Operator + `observability-demo` namespaces. |
+| `01-operatorgroup.yaml` | OperatorGroups for Tempo + OpenTelemetry operators. |
+| `02-subscriptions.yaml` | `tempo-product`, `opentelemetry-product` subscriptions. |
+| `10-tempo.yaml` | `TempoMonolithic` + **Jaeger UI Route** + memory storage. |
+| `11-otel-collector.yaml` | `OpenTelemetryCollector` OTLP in → Tempo gRPC out. |
+| `20-ui-buildconfig.yaml` | Git `contextDir: frontend-ui` → image **`frontend-ui:1.0.0`**. |
+| `21–23` | UI Deployment (OTLP + backend URL env), Service, **edge Route** (user-facing). |
+| `30-backend-buildconfig.yaml` | Git `contextDir: backend-app` → **`backend-app:1.0.0`**. |
+| `31–32` | Backend Deployment (`DB_PASSWORD` from Secret), ClusterIP **Service** (cluster-only). |
+| `40-postgres.yaml` | Postgres **emptyDir**, init schema/data, **Secret** password. |
 
-**Edit before apply if needed:** `21-app-buildconfig.yaml` — change `spec.source.git.uri` / `ref` for a fork or non-`main` branch.
+**Edit if needed:** `spec.source.git` in both `BuildConfig`s for forks/branches; Postgres **image** in `40-postgres.yaml` if Docker Hub is blocked.
 
 ---
 
 ## Prerequisites
 
-- `oc` CLI, logged in with rights to install operators and manage `observability-demo`.
-- Disk/memory for one Tempo monolith pod, one collector pod, one app pod, plus build pods.
+- `oc` CLI, cluster-admin (install), pull secrets if using private registries.
+- Resource headroom: Tempo + Collector + Postgres + 2 Java pods + build pods.
 
 ---
 
 ## Deployment Option Matrix
 
-| Activity | Path A — CLI-first | Path B — Web console hybrid |
-|----------|--------------------|-----------------------------|
-| Namespaces | `oc apply -f observability-demo-ocp418/00-namespace.yaml` | Same, or create `observability-demo` in UI |
-| Tempo operator | `01` + `02` (tempo subscription) | **OperatorHub** → Tempo Operator → `openshift-tempo-operator` |
-| OpenTelemetry operator | `02` (opentelemetry subscription) | **OperatorHub** → Red Hat build of OpenTelemetry |
-| Operands (Tempo, Collector, app) | `oc apply` manifest files | Same after operators are **Succeeded** |
+| Step | Path A — CLI | Path B — Console |
+|------|--------------|------------------|
+| Operators | `oc apply -f openshift/00–02` | OperatorHub → Tempo + OpenTelemetry |
+| Operands + apps | `oc apply` + `oc start-build` | Same after CSV **Succeeded** |
 
 ---
 
 ## Operator Installation Steps
 
-**Path A (CLI)**
-
 ```bash
-oc apply -f observability-demo-ocp418/00-namespace.yaml
-oc apply -f observability-demo-ocp418/01-operatorgroup.yaml
-oc apply -f observability-demo-ocp418/02-subscriptions.yaml
-```
-
-Wait until CSVs succeed:
-
-```bash
+oc apply -f openshift/00-namespace.yaml
+oc apply -f openshift/01-operatorgroup.yaml
+oc apply -f openshift/02-subscriptions.yaml
 oc get csv -n openshift-tempo-operator
 oc get csv -n openshift-opentelemetry-operator
 ```
 
-Expect **`tempo-product`** and **`opentelemetry-product`** in phase **Succeeded**.
-
-**Path B** — see **Web Console Install Path** at the end of this document.
+Wait for **`Succeeded`**.
 
 ---
 
 ## Observability Stack Deployment Steps
 
 ```bash
-oc apply -f observability-demo-ocp418/10-tempo.yaml
-oc apply -f observability-demo-ocp418/11-otel-collector.yaml
+oc apply -f openshift/10-tempo.yaml
+oc apply -f openshift/11-otel-collector.yaml
 ```
 
-Confirm:
-
-```bash
-oc get tempomonolithic -n observability-demo
-oc describe tempomonolithic demo -n observability-demo
-oc get opentelemetrycollector,pods -n observability-demo
-```
-
-**Jaeger UI:** `10-tempo.yaml` sets `spec.jaegerui.enabled: true` and `spec.jaegerui.route.enabled: true`. The operator creates a **Route** (name pattern like `tempo-demo-jaegerui` — confirm with `oc get routes -n observability-demo`). The UI uses **OAuth** via OpenShift; it **queries Tempo** for traces (Tempo holds the data).
+Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.enabled`). List routes: `oc get routes -n observability-demo`.
 
 ---
 
 ## Application Build Steps Using OpenShift Build / S2I
 
-**Why Docker `BuildConfig` (not classic S2I only)**  
-The app targets **Java 21** and builds with **Maven Wrapper** in a **multi-stage Dockerfile**. Many clusters only expose **`openshift/java`** S2I for older JDKs. **Docker strategy + Git** still runs **entirely inside OpenShift** and matches this repo. Optional **S2I** is documented in-repo via `.s2i/environment` and the guide’s **Troubleshooting** if you add a separate `BuildConfig` with `sourceStrategy` and a Java 21 builder `ImageStreamTag`.
+**Strategy:** **Docker** `BuildConfig` + Git (multi-stage `Dockerfile` + Maven Wrapper in each app) — same rationale as before: **Java 21**, reproducible builds, no pre-committed `target/`.
 
-**Steps**
-
-1. Ensure namespace exists (`00-namespace.yaml` already includes `observability-demo`).
-2. Apply image stream and build config:
+1. **PostgreSQL first** (schema before backend):
 
    ```bash
-   oc apply -f observability-demo-ocp418/20-app-imagestream.yaml
-   oc apply -f observability-demo-ocp418/21-app-buildconfig.yaml
+   oc apply -f openshift/40-postgres.yaml
+   oc rollout status deployment/postgres -n observability-demo --timeout=300s
    ```
 
-3. Start build and stream logs:
+2. **Register builds & start** (order flexible; backend is often built first):
 
    ```bash
-   oc start-build demo-monolith -n observability-demo --follow
+   oc apply -f openshift/30-backend-buildconfig.yaml
+   oc apply -f openshift/20-ui-buildconfig.yaml
+   oc start-build backend-app -n observability-demo --follow
+   oc start-build frontend-ui -n observability-demo --follow
    ```
 
-4. Inspect build and image:
+3. **Inspect:**
 
    ```bash
    oc get builds -n observability-demo
-   oc logs -n observability-demo -f build/demo-monolith-<n>
-   oc describe is demo-monolith -n observability-demo
+   oc describe is backend-app -n observability-demo
+   oc describe is frontend-ui -n observability-demo
    ```
-
-5. Successful build populates **`demo-monolith:1.0.0`** on the `ImageStream`.
-
-**Web console:** **Builds** → **BuildConfigs** → **demo-monolith** → **Start build** → **Logs**.
 
 ---
 
 ## Application Deployment Steps
 
-Apply ConfigMap (optional), Service, and Route first if you want routes up before pods; **Deployment** should follow a **successful** build (or expect brief `ImagePullBackOff` until the image exists).
-
 ```bash
-oc apply -f observability-demo-ocp418/22-app-configmap.yaml
-oc apply -f observability-demo-ocp418/24-app-service.yaml
-oc apply -f observability-demo-ocp418/25-app-route.yaml
-oc apply -f observability-demo-ocp418/23-app-deployment.yaml
-oc rollout status deployment/demo-monolith -n observability-demo --timeout=300s
+oc apply -f openshift/32-backend-service.yaml
+oc apply -f openshift/31-backend-deployment.yaml
+oc rollout status deployment/backend-app -n observability-demo --timeout=300s
+
+oc apply -f openshift/22-ui-service.yaml
+oc apply -f openshift/23-ui-route.yaml
+oc apply -f openshift/21-ui-deployment.yaml
+oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
+
+oc get route frontend-ui -n observability-demo -o jsonpath='{.spec.host}{"\n"}'
 ```
 
-**Application Route**
-
-```bash
-oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}{"\n"}'
-```
+Apply **Deployments only after** images exist (or expect short `ImagePullBackOff` until builds finish).
 
 ---
 
 ## OpenTelemetry in Code
 
-1. **Dependencies** — `observability-demo-ocp418/spring-monolith/pom.xml`: `spring-boot-starter-web`, `spring-boot-starter-actuator`, **`micrometer-tracing-bridge-otel`**, **`opentelemetry-exporter-otlp`**.
+### 1. Frontend UI tracing
 
-2. **Export** — Spring Boot **Micrometer Tracing** bridges to the **OpenTelemetry SDK** and sends spans via **OTLP**.
+- **Inbound:** Spring MVC / Tomcat creates a **server span** for each `/action/...` request (`frontend-ui`).
+- **Outbound:** **`RestClient`** is instrumented by Spring Boot 3 + Micrometer tracing; **`traceparent`** (W3C) is sent to **`backend-app`**. No browser JS instrumentation is required because the **browser only loads HTML**; tracing starts at the **frontend pod** when the user follows a link.
 
-3. **Configuration** — `src/main/resources/application.yaml` sets `management.otlp.tracing.endpoint` and `management.tracing.sampling.probability`. The **`Deployment`** overrides OTLP with env (takes precedence in Spring Boot):
+### 2. Backend app tracing
 
-   - `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`
-   - `MANAGEMENT_TRACING_SAMPLING_PROBABILITY=1.0`
-   - `DEMO_INTERNAL_BASE_URL=http://127.0.0.1:8080` (loopback for `RestClient`)
+- **Controller:** Auto **HTTP server** spans for `/api/...`.
+- **Service:** Manual spans **`OrderService.getOrder`**, **`InventoryService.checkStock`**, **`PricingService.getPrice`**.
+- **Repository / DB:** Manual **client** spans **`SELECT orders`**, **`SELECT inventory`**, **`SELECT pricing`** wrapping JPA calls, with **`db.system`**, **`db.statement`**, etc.
 
-4. **OTLP endpoint** — **HTTP/protobuf** to **`otel-collector.observability-demo.svc.cluster.local:4318`** (path `/v1/traces` included in the URL). The Kubernetes **Service** name is **`otel-collector`** because the collector CR is named **`otel`**.
+### 3. Database spans in Jaeger
 
-5. **Protocol / port** — **OTLP/HTTP** on **4318** (receiver in `11-otel-collector.yaml`).
+- Implemented as **OpenTelemetry client spans** (see **Database Span Visibility in Jaeger**). Hibernate may add additional internal spans depending on version; the manual spans are the **contract** for the lab.
 
-6. **Instrumentation** — **Hybrid**: automatic (Spring MVC / embedded Tomcat server spans, **`RestClient`** client spans) + **manual** span in **`OrderService.getOrder`** via injected **`io.opentelemetry.api.trace.Tracer`** (`OpenTelemetryConfig` exposes a `Tracer` bean from auto-configured `OpenTelemetry`).
+### 4. Trace propagation
 
-7. **Span origins** — `OrderController` (GET `/ui/orders/{id}`), `OrderService` (named span `OrderService.getOrder`), `InventoryClient`/`PricingClient` + `InternalApiController` (HTTP client/server pairs on loopback).
+- **W3C Trace Context** on the HTTP call **frontend → backend** via Spring’s propagators.
+- **Single trace** should chain: frontend server → frontend client → backend server → service → DB client.
 
-8. **Context propagation** — Manual span uses `span.makeCurrent()`; **`RestClient`** propagation keeps child HTTP spans in the **same trace** for loopback calls.
+### 5. Service naming
 
-9. **`service.name`** — **`spring.application.name: demo-monolith`** (Micrometer resource defaults).
+- **`frontend-ui`** — `spring.application.name` in `frontend-ui`.
+- **`backend-app`** — `spring.application.name` in `backend-app`.
+- **Postgres-related spans** — same trace as backend; span attributes carry **`db.system=postgresql`** (resource/service still typically **`backend-app`** unless you add peer service attributes).
 
-10. **Jaeger UI** — The UI queries **Tempo**; spans exported with that service name appear under service **`demo-monolith`** (or similar, depending on SDK resource attributes).
+**OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces` on both Deployments.
 
 ---
 
 ## Jaeger UI Enablement
 
-- **Enabled in** `10-tempo.yaml` on the **`TempoMonolithic`** CR:
-
-  ```yaml
-  spec:
-    jaegerui:
-      enabled: true
-      route:
-        enabled: true
-  ```
-
-- **Exposure:** An OpenShift **Route** in **`observability-demo`** (created by the operator). List:
-
-  ```bash
-  oc get routes -n observability-demo
-  ```
-
-- **Access:** HTTPS to the Route host; **OpenShift OAuth** protects the UI (login with a user who can access the namespace as required by the operator).
-
-- **Relationship to Tempo:** Jaeger UI here is a **compatibility/query layer**: trace **storage and retention** are **Tempo** (in-memory for this demo). You are not running a separate Jaeger all-in-one collector store.
-
-- **If the Route is unavailable** (policy, DNS): use **`oc port-forward`** to the Tempo query / Jaeger UI **Service** (discover names with `oc get svc -n observability-demo | grep -i tempo`) and open `https://localhost:...` as documented by your operator version, or see **Troubleshooting**.
+- Configured on **`TempoMonolithic`** in `openshift/10-tempo.yaml` (`jaegerui.enabled`, `route.enabled`).
+- **Jaeger UI does not store traces** here — it **queries Tempo**.
+- Access: **Route** in `observability-demo` (plus OAuth). Fallback: `oc port-forward` to the Jaeger UI / query **Service** if routes are restricted.
 
 ---
 
 ## Tracing Testing
 
-Step-by-step **end-to-end tracing** validation using the app and **Jaeger UI**.
+End-to-end validation checklist:
 
-1. **Generate traffic** — Call the monolith’s **frontend-style** API on the **Route** (HTTPS).
+1. **Open** the **`frontend-ui`** Route in a browser (`oc get route frontend-ui -n observability-demo`).
+2. **Click** **Get Order** (or Inventory / Price) — each click starts a **new trace**.
+3. **Open Jaeger UI** Route (same namespace); select service **`frontend-ui`** and/or **`backend-app`**.
+4. **Find** a trace matching the click time; root is often the **frontend** HTTP span.
+5. **Confirm spans:**
+   - **Frontend:** HTTP server for `/action/...`; HTTP **client** to `/api/...`.
+   - **Backend:** HTTP server for `/api/...`; **`OrderService.*`** / **`InventoryService.*`** / **`PricingService.*`**; **`SELECT ...`** **client** spans with **`db.system=postgresql`**.
+6. **Collector sanity:** `oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=80`.
+7. **If no traces:** See **Troubleshooting**; verify OTLP env on both Deployments, Collector + Tempo pods, and that Postgres is **Ready** before heavy backend traffic.
+8. **Load (optional):** repeat clicks or script `curl` against the **frontend** Route (session-less links).
 
-2. **Example `curl` (replace `HOST` with your route host):**
+---
 
-   ```bash
-   HOST=$(oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}')
-   curl -sk "https://${HOST}/ui/orders/42"
-   ```
+## UI Click Trace Testing
 
-3. **Endpoint to use** — **`GET /ui/orders/{id}`** (e.g. `id=42`). This hits the controller → service → internal HTTP clients.
+1. Browse to **`https://<frontend-ui-route-host>/`**.
+2. Click **Get Order** → expect JSON-like payload for **`ORD-001`** on the result page.
+3. In Jaeger, find a trace where the **first span** is associated with **`frontend-ui`** and path **`/action/order/ORD-001`** (names may vary slightly by instrumentation).
+4. Expand children until you see **`backend-app`** **HTTP** span for **`GET /api/orders/ORD-001`**.
+5. Under that, confirm **service** + **`SELECT orders`** (or equivalent) span.
+6. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** (`SKU-100`).
 
-4. **Why ≥3 spans** — One trace should include at least: **HTTP server** for `/ui/orders/...`, **manual** `OrderService.getOrder`, and **HTTP client/server** for `/internal/inventory/...` (plus optional pricing spans).
+---
 
-5. **Verify from logs first (optional)** — Collector debug output:
+## Jaeger Waterfall Interpretation
 
-   ```bash
-   oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=100
-   ```
-
-   You should see span batches if export works.
-
-6. **Open Jaeger UI** — From `oc get routes -n observability-demo`, open the **Jaeger UI** route URL in a browser (TLS). Complete OpenShift login if prompted.
-
-7. **Search for the service** — In Jaeger UI, choose service **`demo-monolith`** (or the exact name shown in the service dropdown).
-
-8. **Find your trace** — Click **Find Traces** with a short lookback (e.g. last 15 minutes). Identify a trace whose root operation matches **`GET /ui/orders/{id}`** (or equivalent HTTP span name) close to the time you ran `curl`.
-
-9. **Parent / child relationships** — Open a trace: the **top span** is typically the inbound HTTP request; **children** include `OrderService.getOrder` and **client** spans to internal paths, with **nested server** spans for `/internal/...`.
-
-10. **Expected span names / operations** — Look for operations similar to: **`GET /ui/orders/{id}`**, **`OrderService.getOrder`**, **`GET /internal/inventory/...`** (and client variants), **`GET /internal/pricing/...`**. Exact strings can vary slightly by instrumentation version.
-
-11. **If no traces appear** — Check: app pod running and env `MANAGEMENT_OTLP_TRACING_ENDPOINT` correct (`oc set env deployment/demo-monolith --list -n observability-demo`); collector pod ready; Tempo monolith ready; generate traffic **after** all are ready; try collector logs; confirm no network policies block `observability-demo` (org-specific); verify OTLP path includes **`/v1/traces`**.
-
-12. **Optional load** — Generate more traces:
-
-    ```bash
-    for i in $(seq 1 30); do curl -sk "https://${HOST}/ui/orders/$i" -o /dev/null; done
-    ```
+- **Top to bottom:** Time flows downward; **width** ≈ duration.
+- **Expected shape (Get Order):**  
+  **frontend-ui** server (wide) contains **frontend-ui** client (narrower) → **backend-app** server → **OrderService.getOrder** → **`SELECT orders`** (often short but visible).
+- **Latency:** Sum of **network + JVM + JDBC + Postgres**; DB span width is **query + round-trip**; missing widening in DB layer may mean the query is fast or the span is missing (see **Database Span Visibility**).
+- **Missing DB span:** Usually **instrumentation** not reaching JPA (here mitigated by **manual** spans); if **only** auto-instrumentation were used, missing JDBC spans would point to disabled observations or unsupported stack.
 
 ---
 
 ## Verification Steps
 
-| Check | Command / action |
-|-------|------------------|
+| Goal | Command / action |
+|------|------------------|
 | Operators | `oc get csv -n openshift-tempo-operator` ; `oc get csv -n openshift-opentelemetry-operator` |
-| Tempo CR | `oc get tempomonolithic -n observability-demo` ; `oc describe tempomonolithic demo -n observability-demo` |
-| Collector | `oc get opentelemetrycollector,pods -n observability-demo` |
-| Jaeger UI Route | `oc get routes -n observability-demo` (UI route + app route) |
-| Build | `oc get builds -n observability-demo` ; build phase **Complete** |
-| Image | `oc describe is demo-monolith -n observability-demo` (tag `1.0.0`) |
-| App pod | `oc get pods -l app.kubernetes.io/name=demo-monolith -n observability-demo` |
-| App route | `oc get route demo-monolith -n observability-demo` |
-| Sample request | `curl -sk "https://$(oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}')/ui/orders/1"` |
-| Traces in UI | **Tracing Testing** section |
-| Fallback | `oc port-forward` to collector or query svc; `oc logs` on app, collector, tempo pods |
+| Tempo / Collector | `oc get tempomonolithic,pods,opentelemetrycollector -n observability-demo` |
+| Postgres | `oc get pods -l app.kubernetes.io/name=postgres -n observability-demo` ; `oc logs deploy/postgres -n observability-demo --tail=20` |
+| Backend | `oc get pods -l app.kubernetes.io/name=backend-app -n observability-demo` ; `curl -sS http://$(oc get svc backend-app -o jsonpath='{.spec.clusterIP}' -n observability-demo):8080/api/orders/ORD-001` from a debug pod or port-forward |
+| Frontend route | `oc get route frontend-ui -n observability-demo` |
+| UI smoke | Browser: click all three actions |
+| Jaeger | **Tracing Testing** + **UI Click Trace Testing** |
+| Different `service.name` | Filter by **`frontend-ui`** vs **`backend-app`** in Jaeger service list |
 
 ---
 
 ## Expected Trace Flow
 
-For **`GET /ui/orders/{id}`**:
+**One user click (e.g. Get Order):**
 
-1. **Controller / ingress** — Server span for the UI HTTP request.  
-2. **Service** — Manual span **`OrderService.getOrder`**.  
-3. **Integration** — **`RestClient`** client span to **`/internal/inventory/...`** + server span on internal controller (same trace).  
-4. **Bonus** — Pricing client/server pair.
+1. **frontend-ui** — Server span for `/action/order/ORD-001`.  
+2. **frontend-ui** — Client span → **backend-app** `/api/orders/ORD-001`.  
+3. **backend-app** — Server span for API.  
+4. **backend-app** — `OrderService.getOrder` + **`SELECT orders`** (DB client).  
+
+Minimum **three logical layers** visible: **UI pod**, **API pod**, **database client span**.
 
 ---
 
 ## Troubleshooting
 
-### Warnings when applying `10-tempo.yaml`
-
-You may see:
-
-1. **`TempoMonolithic instances without multi-tenancy provide no authentication or authorization on the ingest or query paths, and are not supported on OpenShift`**  
-   - **Meaning:** In **single-tenant** mode, **OTLP ingest** and **query HTTP/gRPC** inside the cluster are **not** protected by Tempo-level auth. Red Hat flags that as **not a supported production posture** on OpenShift.  
-   - **For this lab:** Acceptable on a **sandbox / internal demo** where only trusted workloads reach the cluster network and **Jaeger UI** is still fronted by **OAuth** on the Route.  
-   - **To align with multitenancy expectations:** Enable **`spec.multitenancy`** (`mode: openshift`, at least one `tenantName` / `tenantId`), add **`x-scope-orgid`** (or equivalent) on the Collector’s OTLP exporter to Tempo, and configure **RBAC** per Red Hat *Distributed tracing* multitenancy docs (more moving parts than this minimal demo).
-
-2. **`overriding Tempo configuration could potentially break the deployment`**  
-   - **Meaning:** `spec.extraConfig` merges into generated Tempo config; mistakes can break the stack.  
-   - **This repo:** Only **`compactor.compaction.block_retention: 24h`** is set; that is a common, low-risk knob. You can remove **`extraConfig`** if you prefer the operator defaults.
-
-| Issue | What to do |
-|-------|------------|
-| Build: `gzip: Cannot exec` | Ensure current **`Dockerfile`** includes `microdnf install -y gzip tar` before `./mvnw`. |
-| Build: Git / Maven network | Allow egress from build pods to GitHub and Maven Central (or configure mirrors). |
-| `debug` exporter unsupported | In `11-otel-collector.yaml`, swap **`debug`** exporter for **`logging`** and update the traces pipeline exporters list accordingly. |
-| No traces in UI | Follow **Tracing Testing** §11; verify OTLP URL and collector → Tempo connectivity. |
-| Jaeger UI 403 / OAuth | Use permitted OpenShift user; try **port-forward** to UI/query **Service** if policy allows. |
-| Image pull on app | Confirm build completed and `demo-monolith:1.0.0` exists on `ImageStream`. |
+| Issue | Notes |
+|-------|--------|
+| Tempo apply **warnings** (multitenancy / `extraConfig`) | See earlier doc revision / Red Hat guidance; lab uses single-tenant **TempoMonolithic** + Jaeger OAuth on the UI Route. |
+| Postgres **CrashLoop** on restricted SCC | Try adjusting **image** or **securityContext** per cluster policy; ensure **`emptyDir`** and `PGDATA` subpath as in `40-postgres.yaml`. |
+| **ImagePullBackOff** for `postgres:16-alpine` | Use an internal mirror or Red Hat image; update `40-postgres.yaml`. |
+| Backend **unready** | Postgres not ready, wrong password, or DB not initialized — check `oc logs deploy/backend-app`. |
+| **No DB spans** | Confirm backend image includes **manual** spans in services; check Jaeger for collapsed child spans. |
+| **`debug` exporter** errors on Collector | Switch **`debug`** → **`logging`** in `11-otel-collector.yaml` pipeline. |
 
 ---
 
 ## Cleanup
 
 ```bash
-oc delete -f observability-demo-ocp418/25-app-route.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/24-app-service.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/23-app-deployment.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/22-app-configmap.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/21-app-buildconfig.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/20-app-imagestream.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/11-otel-collector.yaml --ignore-not-found
-oc delete -f observability-demo-ocp418/10-tempo.yaml --ignore-not-found
+oc delete -f openshift/23-ui-route.yaml --ignore-not-found
+oc delete -f openshift/22-ui-service.yaml --ignore-not-found
+oc delete -f openshift/21-ui-deployment.yaml --ignore-not-found
+oc delete -f openshift/32-backend-service.yaml --ignore-not-found
+oc delete -f openshift/31-backend-deployment.yaml --ignore-not-found
+oc delete -f openshift/30-backend-buildconfig.yaml --ignore-not-found
+oc delete -f openshift/20-ui-buildconfig.yaml --ignore-not-found
+oc delete -f openshift/40-postgres.yaml --ignore-not-found
+oc delete -f openshift/11-otel-collector.yaml --ignore-not-found
+oc delete -f openshift/10-tempo.yaml --ignore-not-found
 oc delete project observability-demo
-# Optionally remove operator subscriptions/namespaces if no longer needed elsewhere.
 ```
 
 ---
 
 ## Apply All
 
-From repository root (paths relative to clone):
-
 ```bash
-oc apply -f observability-demo-ocp418/00-namespace.yaml
-oc apply -f observability-demo-ocp418/01-operatorgroup.yaml
-oc apply -f observability-demo-ocp418/02-subscriptions.yaml
-# Wait for CSVs Succeeded
-oc apply -f observability-demo-ocp418/10-tempo.yaml
-oc apply -f observability-demo-ocp418/11-otel-collector.yaml
-oc apply -f observability-demo-ocp418/20-app-imagestream.yaml
-oc apply -f observability-demo-ocp418/21-app-buildconfig.yaml
-oc apply -f observability-demo-ocp418/22-app-configmap.yaml
-oc apply -f observability-demo-ocp418/24-app-service.yaml
-oc apply -f observability-demo-ocp418/25-app-route.yaml
+oc apply -f openshift/00-namespace.yaml
+oc apply -f openshift/01-operatorgroup.yaml
+oc apply -f openshift/02-subscriptions.yaml
+# wait for CSVs Succeeded
+oc apply -f openshift/10-tempo.yaml
+oc apply -f openshift/11-otel-collector.yaml
+oc apply -f openshift/40-postgres.yaml
+oc rollout status deployment/postgres -n observability-demo --timeout=300s
+oc apply -f openshift/30-backend-buildconfig.yaml
+oc apply -f openshift/20-ui-buildconfig.yaml
 ```
 
-Apply **`23-app-deployment.yaml`** after the first successful image build (or accept retries until the image exists).
+Then **build images** (see below), then:
+
+```bash
+oc apply -f openshift/32-backend-service.yaml
+oc apply -f openshift/31-backend-deployment.yaml
+oc apply -f openshift/22-ui-service.yaml
+oc apply -f openshift/23-ui-route.yaml
+oc apply -f openshift/21-ui-deployment.yaml
+```
 
 ---
 
 ## Build and Deploy App
 
 ```bash
-oc start-build demo-monolith -n observability-demo --follow
-oc get builds -n observability-demo
-oc describe is demo-monolith -n observability-demo
-oc apply -f observability-demo-ocp418/23-app-deployment.yaml
-oc rollout status deployment/demo-monolith -n observability-demo --timeout=300s
-oc get route demo-monolith -n observability-demo
+oc start-build backend-app -n observability-demo --follow
+oc start-build frontend-ui -n observability-demo --follow
+oc rollout status deployment/backend-app -n observability-demo --timeout=300s
+oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
 ```
 
 ---
 
 ## Web Console Install Path
 
-**Tempo Operator**
+**Tempo Operator:** **Administrator** → **Operators** → **OperatorHub** → search **Tempo** → **Install** → **`openshift-tempo-operator`**, **stable**, **Automatic**.
 
-1. **Administrator** → **Operators** → **OperatorHub**.  
-2. Search **Tempo** / **distributed tracing**.  
-3. Open **Tempo Operator** (Red Hat).  
-4. **Install** → **All namespaces on the cluster** → installed namespace **`openshift-tempo-operator`** → channel **`stable`** → **Automatic** → **Install**.
+**Red Hat build of OpenTelemetry:** **OperatorHub** → **Red Hat build of OpenTelemetry** → **`openshift-opentelemetry-operator`**, **stable**, **Automatic**.
 
-**Red Hat build of OpenTelemetry Operator**
-
-1. **Operators** → **OperatorHub**.  
-2. Search **Red Hat build of OpenTelemetry**.  
-3. **Install** → **All namespaces** → **`openshift-opentelemetry-operator`** → **`stable`** → **Automatic** → **Install**.
-
-Then apply **`10-tempo.yaml`**, **`11-otel-collector.yaml`**, and the app manifests with **`oc apply`** as above, and run **`oc start-build`**.
+Then apply **`openshift/10-tempo.yaml`**, **`11-otel-collector.yaml`**, and the rest via CLI as above.
 
 ---
 
 ## Tracing Test Quickstart
 
 ```bash
-oc get routes -n observability-demo
-HOST=$(oc get route demo-monolith -n observability-demo -o jsonpath='{.spec.host}')
-curl -sk "https://${HOST}/ui/orders/7"
+HOST=$(oc get route frontend-ui -n observability-demo -o jsonpath='{.spec.host}')
+open "https://${HOST}/"
+# Click "Get Order", then open Jaeger UI route → service frontend-ui / backend-app → Find Traces
 ```
-
-Open the **Jaeger UI** route from `oc get routes -n observability-demo`, choose service **`demo-monolith`**, **Find Traces**, open the trace for **`GET /ui/orders/...`** matching your request time.
 
 ---
 
-## OpenTelemetry in Code
+## OpenTelemetry in Code (recap)
 
-**Short recap** (full 10-point explanation is the numbered list **earlier** in this document, under the first **OpenTelemetry in Code** heading).
-
-- **Deps:** Micrometer OTel bridge + OTLP exporter in **`pom.xml`**.  
-- **Export:** OTLP **HTTP** to **`otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`** (`MANAGEMENT_OTLP_TRACING_ENDPOINT` on the `Deployment`).  
-- **Spans:** Auto (MVC + `RestClient`) + manual **`OrderService.getOrder`**; **`service.name`** = **`demo-monolith`**.  
-- **Jaeger UI:** Queries **Tempo**; use **Tracing Testing** to find traces and span hierarchy.
+- **frontend-ui** + **backend-app**: Micrometer **OTLP HTTP** → **`otel-collector.observability-demo.svc.cluster.local:4318`**.  
+- **Propagation:** **W3C** on **RestClient** from UI to API.  
+- **DB:** **Manual** `SpanKind.CLIENT` spans with **`db.*`** attributes on **`backend-app`**.  
+- **Jaeger:** Queries **Tempo**; filter **`frontend-ui`** vs **`backend-app`** for layer proof.

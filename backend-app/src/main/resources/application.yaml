@@ -1,0 +1,36 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: backend-app
+  datasource:
+    url: jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb
+    username: demo
+    password: ${DB_PASSWORD:demo}
+    hikari:
+      maximum-pool-size: 5
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    show-sql: false
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  tracing:
+    sampling:
+      probability: 1.0
+  observations:
+    enable:
+      jdbc: true
+  otlp:
+    tracing:
+      endpoint: http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces

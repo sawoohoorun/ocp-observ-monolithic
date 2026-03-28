@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Observability demo — Frontend</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; }
+    h1 { color: #333; }
+    .actions a {
+      display: inline-block; margin: 0.5rem 0.5rem 0.5rem 0; padding: 0.6rem 1rem;
+      background: #0066cc; color: white; text-decoration: none; border-radius: 6px;
+    }
+    .actions a:hover { background: #004499; }
+    p.note { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<h1>Tracing demo — Frontend UI</h1>
+<p class="note">Each action performs an HTTP call to <strong>backend-app</strong> and should create a multi-service trace (frontend-ui → backend-app → PostgreSQL spans).</p>
+<div class="actions">
+  <a th:href="@{/action/order/ORD-001}">Get Order</a>
+  <a th:href="@{/action/inventory/SKU-100}">Check Inventory</a>
+  <a th:href="@{/action/pricing/SKU-100}">Calculate Price</a>
+</div>
+</body>
+</html>

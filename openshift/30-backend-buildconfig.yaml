@@ -1,0 +1,38 @@
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: backend-app
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/name: backend-app
+    app.kubernetes.io/part-of: observability-demo
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: backend-app
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/name: backend-app
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+  runPolicy: Serial
+  source:
+    type: Git
+    git:
+      uri: https://github.com/sawoohoorun/ocp-observ-monolithic.git
+      ref: main
+    contextDir: backend-app
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: backend-app:1.0.0
+  triggers:
+    - type: ConfigChange

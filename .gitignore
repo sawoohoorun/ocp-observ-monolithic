@@ -1,5 +1,6 @@
 # Maven
-observability-demo-ocp418/spring-monolith/target/
+backend-app/target/
+frontend-ui/target/
 
 # IDE / OS
 .idea/

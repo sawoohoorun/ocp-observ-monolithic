@@ -1,3 +1,0 @@
-# Optional: used only if you create a Source-to-Image BuildConfig (see lab guide).
-# Red Hat Java S2I runs Maven in the builder image; Spring Boot fat JAR is produced under target/.
-MAVEN_ARGS_APPEND=-DskipTests
