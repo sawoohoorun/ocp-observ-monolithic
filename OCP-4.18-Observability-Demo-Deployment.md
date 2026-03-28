@@ -375,6 +375,19 @@ For **`GET /ui/orders/{id}`**:
 
 ## Troubleshooting
 
+### Warnings when applying `10-tempo.yaml`
+
+You may see:
+
+1. **`TempoMonolithic instances without multi-tenancy provide no authentication or authorization on the ingest or query paths, and are not supported on OpenShift`**  
+   - **Meaning:** In **single-tenant** mode, **OTLP ingest** and **query HTTP/gRPC** inside the cluster are **not** protected by Tempo-level auth. Red Hat flags that as **not a supported production posture** on OpenShift.  
+   - **For this lab:** Acceptable on a **sandbox / internal demo** where only trusted workloads reach the cluster network and **Jaeger UI** is still fronted by **OAuth** on the Route.  
+   - **To align with multitenancy expectations:** Enable **`spec.multitenancy`** (`mode: openshift`, at least one `tenantName` / `tenantId`), add **`x-scope-orgid`** (or equivalent) on the Collector’s OTLP exporter to Tempo, and configure **RBAC** per Red Hat *Distributed tracing* multitenancy docs (more moving parts than this minimal demo).
+
+2. **`overriding Tempo configuration could potentially break the deployment`**  
+   - **Meaning:** `spec.extraConfig` merges into generated Tempo config; mistakes can break the stack.  
+   - **This repo:** Only **`compactor.compaction.block_retention: 24h`** is set; that is a common, low-risk knob. You can remove **`extraConfig`** if you prefer the operator defaults.
+
 | Issue | What to do |
 |-------|------------|
 | Build: `gzip: Cannot exec` | Ensure current **`Dockerfile`** includes `microdnf install -y gzip tar` before `./mvnw`. |
