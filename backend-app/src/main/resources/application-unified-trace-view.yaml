@@ -1,0 +1,10 @@
+# Optional profile: Unified Service View Mode (workshop / demo only).
+# Activate: SPRING_PROFILES_ACTIVE=unified-trace-view
+spring:
+  application:
+    name: order-demo-app
+
+management:
+  opentelemetry:
+    resource-attributes:
+      "service.name": order-demo-app

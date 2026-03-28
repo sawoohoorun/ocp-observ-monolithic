@@ -24,7 +24,7 @@ public class InventoryService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> checkInventory(String sku) {
-    Span business = tracer.spanBuilder("InventoryService.checkStock").startSpan();
+    Span business = tracer.spanBuilder("backend: check inventory").startSpan();
     try (Scope scope = business.makeCurrent()) {
       business.setAttribute("inventory.sku", sku);
 

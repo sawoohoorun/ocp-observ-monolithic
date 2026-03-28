@@ -83,7 +83,7 @@ flowchart LR
 
 ## Same Trace ID Across Frontend and Backend
 
-**Tracing consistency requirement (default):** When a user opens the UI and triggers an action such as **Get Order**, the **entire path** MUST stay in **one distributed trace**: **`frontend-ui`** spans and **`backend-app`** spans share the **same trace ID**. In Jaeger they MUST appear as **different services** — preferred resource names **`frontend-ui`** and **`backend-app`** — not merged into one service unless you deliberately follow **Optional: Force Frontend and Backend to Appear as the Same Service**. **PostgreSQL-related client spans** (e.g. **`SELECT orders`**) MUST remain in that **same trace**, typically as descendants of the backend HTTP span.
+**Tracing consistency requirement (default):** When a user opens the UI and triggers an action such as **Get Order**, the **entire path** MUST stay in **one distributed trace**: **`frontend-ui`** spans and **`backend-app`** spans share the **same trace ID**. In Jaeger they MUST appear as **different services** — preferred resource names **`frontend-ui`** and **`backend-app`** — not merged into one service unless you deliberately enable **Unified Service View Mode** (workshop-only). **PostgreSQL-related client spans** (e.g. **`SELECT orders`**) MUST remain in that **same trace**, typically as descendants of the backend HTTP span.
 
 **Implementation requirement:** Application code and runtime configuration MUST preserve **W3C Trace Context** end to end on the **frontend → backend** hop (at minimum **`traceparent`** injection on the outbound request and extraction on the inbound request). Any change that drops, rewrites, or bypasses that propagation breaks **single-trace** behavior.
 
@@ -121,20 +121,100 @@ Use **Troubleshooting — distributed trace correlation** in the main **Troubles
 
 ---
 
-## Optional: Force Frontend and Backend to Appear as the Same Service
+## Unified Service View Mode (optional — not default)
 
-**Default remains:** **same trace ID**, **different** **`service.name`** values (**`frontend-ui`** / **`backend-app`**), **one** trace including DB spans.
+**Unified Service View Mode** is a **selectable workshop / storytelling** configuration: **`frontend-ui`** and **`backend-app`** still participate in **one trace ID** for a single user action, but both export spans with the **same** OpenTelemetry resource **`service.name`**: **`order-demo-app`**. **PostgreSQL** client spans (**`SELECT orders`**, **`SELECT inventory`**, **`SELECT pricing`**) stay in that **same trace** and keep **JDBC / `db.*` semantics**; they inherit the **same resource** as the backend process (expected for in-process DB client spans).
 
-If you **explicitly** want both tiers to show as **one service** in Jaeger (e.g. a simplified screenshot), you can set the **same** OpenTelemetry **`service.name`** resource in **both** applications — for example align **`spring.application.name`** (and any OTLP resource overrides) to a single value in **`frontend-ui`** and **`backend-app`**.
+**Default (recommended):** **same trace ID**, **different** services **`frontend-ui`** and **`backend-app`**. Use **Unified Service View** only when **explicitly** desired for simplified Jaeger screenshots or executive demos — **not** as production best practice (see **When NOT to Use Unified Service View**).
 
-**Tradeoffs (why this is usually NOT recommended):**
+### 1. Why frontend and backend intentionally share one service name
 
-- **Jaeger** and service graphs **no longer separate** frontend vs backend ownership.
-- **Service dependency** and **error attribution** views become **less useful**.
-- **On-call and troubleshooting** are harder because span process labels no longer match deployment boundaries.
-- **Distributed boundaries** (UI vs API) are **hidden** even though the trace id may still be correct.
+To reduce **visual noise** in the Jaeger **service** filter: a single **`order-demo-app`** entry represents the **whole logical app** for audiences who care about **one product** rather than **two deployments**. It is a **presentation** choice; it does **not** change how many pods or Deployments you run.
 
-Use this **only** as a **demo shortcut**; revert to **distinct** **`service.name`** values for realistic observability.
+### 2. How this changes Jaeger search behavior
+
+You search traces by **`order-demo-app`** only (instead of picking **`frontend-ui`** vs **`backend-app`**). **Find Traces** lists traces that include that service; opening a trace still shows the **full span tree** — **all** spans in the trace appear together.
+
+### 3. How this improves workshop storytelling
+
+Narrators can say “everything you see under **order-demo-app** is **one** user click” without switching services in the UI. **Span names** carry **UI vs API** meaning (see below).
+
+### 4. What observability fidelity is lost
+
+- **Service-level** dashboards, **RED** metrics by service, and **dependency graphs** no longer split UI and API.
+- **Ownership** (who runs the UI Deployment vs API Deployment) is **not** visible from **`service.name`** alone.
+- **Alerting** “errors in frontend” vs “errors in backend” from trace-derived metrics is **weaker**.
+
+### 5. How trace boundaries are still preserved by span hierarchy
+
+**Parent/child** relationships are unchanged: **HTTP server** (UI) → **client** (UI→API) → **HTTP server** (API) → **`backend: …`** business spans → **`SELECT …`**. The **waterfall** still shows **order of execution** and **latency** between logical layers even when the **process service** label matches.
+
+### 6. Why trace ID continuity still matters
+
+**Unified service name** does **not** replace **trace correlation**. If **propagation** breaks, you still get **two traces** with the **same** misleading **`order-demo-app`** label on both sides — **trace ID** is the real join key. **W3C `traceparent`** must still flow **UI → API**.
+
+### 7. Why SQL spans remain visible as separate operations
+
+Span **names** (**`SELECT orders`**, etc.) and **`db.*`** attributes identify **database work** as distinct spans. **Service name** does not collapse those into “one blob”; they remain **child spans** under the backend HTTP / service subtree.
+
+---
+
+### Configuration (required for Unified Service View)
+
+**Supported mechanism in this repository (single approach, both apps):**
+
+1. Spring profile **`unified-trace-view`** activates **`application-unified-trace-view.yaml`** in **`frontend-ui`** and **`backend-app`**.
+2. That file sets **`spring.application.name: order-demo-app`** and **`management.opentelemetry.resource-attributes."service.name": order-demo-app`**.
+
+**Enable on OpenShift (both Deployments):**
+
+```bash
+oc set env deployment/frontend-ui -n observability-demo SPRING_PROFILES_ACTIVE=unified-trace-view
+oc set env deployment/backend-app -n observability-demo SPRING_PROFILES_ACTIVE=unified-trace-view
+oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
+oc rollout status deployment/backend-app -n observability-demo --timeout=300s
+```
+
+**Disable:** `oc set env deployment/frontend-ui -n observability-demo SPRING_PROFILES_ACTIVE-` and the same for **`backend-app`**, then **`oc rollout restart`** both Deployments.
+
+**Alternative:** **`OTEL_SERVICE_NAME=order-demo-app`** on both pods if your platform standardizes on that; align with **`spring.application.name`** to avoid conflicts. The **profile** path is **canonical** in this repo.
+
+---
+
+### Span naming (mandatory for readable unified waterfall)
+
+| Area | Span names (examples in this repo) |
+|------|-------------------------------------|
+| **Frontend** | **`frontend: load order page`** / inventory / pricing, **`frontend: call backend`** |
+| **Backend** | **`backend: get order`**, **`backend: check inventory`**, **`backend: calculate price`** |
+| **PostgreSQL** | **`SELECT orders`**, **`SELECT inventory`**, **`SELECT pricing`** |
+
+---
+
+### Jaeger testing — Unified Service View Mode
+
+1. Enable the profile on **both** Deployments; rebuild if needed.
+2. Trigger **one** UI action.
+3. In Jaeger **Service**, select **`order-demo-app`**.
+4. Open **one** trace; confirm **`frontend: …`** and **`backend: …`** span names, **`SELECT …`**, and **one trace ID**.
+
+---
+
+### Troubleshooting — Unified Service View Mode
+
+| Issue | Notes |
+|-------|--------|
+| **Hard to distinguish spans** | Use **`frontend:`** / **`backend:`** prefixes and HTTP operation names. |
+| **Mixed `order-demo-app` and `backend-app`** | Set profile on **both** Deployments. |
+| **Wrong `service.name`** | Resolve env precedence (**`OTEL_SERVICE_NAME`**, etc.). |
+| **Two traces, same service name** | **Propagation** still broken — check **`traceparent`**. |
+
+---
+
+## When NOT to Use Unified Service View
+
+- **Not** for **production**; keep **`frontend-ui`** / **`backend-app`** as separate **`service.name`** values for real operations.
+- **Use only** for workshops / executive demos. **Normal mode:** no **`unified-trace-view`** profile.
 
 ---
 
@@ -187,8 +267,8 @@ The previous single **`spring-monolith`** tree was **removed** in favor of this 
 |------|--------|-----|
 | **Layout** | Replaced single `spring-monolith` with **`frontend-ui/`** + **`backend-app/`** | Separate deployments, routes, and **`service.name`** values for Jaeger. |
 | **Manifests** | Moved to **`openshift/`** with numbered files (`20`–`40`) | Matches OpenShift-focused layout you requested. |
-| **Backend** | JPA + Postgres + manual **DB client spans** | Satisfy **Layer 3** visibility in Jaeger. |
-| **Frontend** | New Thymeleaf app + **`RestClient`** | **Layer 1** server span + **HTTP client** span to backend with **W3C** propagation; **one trace ID** with **`backend-app`** (see **Same Trace ID Across Frontend and Backend**). |
+| **Backend** | JPA + Postgres + manual **DB client spans** + **`backend: …`** business span names | Satisfy **Layer 3** visibility; readable in **Unified Service View**. |
+| **Frontend** | New Thymeleaf app + **`RestClient`** + **`frontend: …`** spans | **W3C** propagation + **one trace ID**; optional profile **`unified-trace-view`** → **`order-demo-app`**. |
 | **Postgres** | New `40-postgres.yaml` | Ephemeral DB with seed data; **no PVC**. |
 
 ---
@@ -330,14 +410,15 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 ### 1. Frontend UI tracing (server-side)
 
-- **Inbound HTTP:** Spring MVC / Tomcat creates a **server span** for each `/action/...` request; **`service.name`** = **`frontend-ui`** (`spring.application.name`).
+- **Inbound HTTP:** Spring MVC / Tomcat creates a **server span** for each `/action/...` request; **`service.name`** = **`frontend-ui`** by default, or **`order-demo-app`** with profile **`unified-trace-view`**.
+- **Manual UI spans:** **`UiController`** adds **`frontend: load … page`** and **`frontend: call backend`**.
 - **Outbound HTTP:** **`RestClient`** to **`backend-app`** MUST run with the **active trace** so Micrometer injects **`traceparent`** (and optional **`tracestate`**) on the outbound call. **Requirement:** use the **instrumented** **`RestClient`** bean pattern (see `ClientConfig` / `UiController`); avoid ad-hoc **`HttpURLConnection`** or third-party clients that ignore context.
 - **Browser:** This UI is **not** a SPA making direct traced XHR/fetch to the API. The **browser** only does a **full-page GET** to **`frontend-ui`**; the **trace starts in the frontend service** when that request hits the pod. **Browser-to-backend direct** calls would require **browser instrumentation** (e.g. OpenTelemetry JS) **and** CORS/header rules to propagate **`traceparent`** — **out of scope** for the default demo by design.
 
 ### 2. Backend app tracing
 
 - **Inbound HTTP:** MUST **extract** W3C context from headers and create the **server span** as a **child** of the frontend client span (Spring Boot server instrumentation does this when headers are present).
-- **Internal spans:** **Controller**, **service**, and **repository** layers MUST create spans **under** that server span (same trace id).
+- **Internal spans:** **Controller**, **service**, and **repository** layers MUST create spans **under** that server span (same trace id). Manual business spans: **`backend: get order`**, **`backend: check inventory`**, **`backend: calculate price`**.
 - **Database:** Manual **CLIENT** spans for SQL (**`SELECT …`**) MUST use the **current** context so **Postgres-related spans** stay in the **same trace** as the HTTP request.
 
 ### 3. Database spans in Jaeger
@@ -353,7 +434,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 - **`frontend-ui`** — `spring.application.name` in `frontend-ui`.
 - **`backend-app`** — `spring.application.name` in `backend-app`.
-- **Postgres-related spans** — same **trace id** as the backend HTTP span; **`service.name`** remains **`backend-app`** on those spans unless you add peer/resource overrides (see **Optional: Force Frontend and Backend to Appear as the Same Service** only if you intentionally unify names).
+- **Postgres-related spans** — same **trace id** as the backend HTTP span; **`service.name`** remains **`backend-app`** in default mode (or **`order-demo-app`** under **Unified Service View Mode**).
 
 **OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces` on both Deployments.
 
@@ -371,12 +452,16 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 **Goal:** Prove **one trace ID** for **one** UI action, with spans from **`frontend-ui`**, **`backend-app`**, and the **SQL client** span in the **same** Jaeger trace.
 
+**Default mode:** Look for **`frontend: load …`**, **`frontend: call backend`**, **`backend: get order`** (or inventory/pricing), **`SELECT …`**.
+
+**Unified Service View Mode:** Search Jaeger service **`order-demo-app`**; see **Jaeger testing — Unified Service View Mode**.
+
 1. **Trigger exactly one UI action** — e.g. open **`frontend-ui`** Route (`oc get route frontend-ui -n observability-demo`) and click **Get Order** once (wait for the page to load). Each separate click creates a **new** trace; isolate **one** action for validation.
 2. **Open Jaeger UI** (Tempo-backed route in **`observability-demo`**).
 3. **Find that trace** — search by time window and/or service **`frontend-ui`** or **`backend-app`**.
 4. **Open the trace detail** and confirm the waterfall includes spans from **both** services:
-   - At least one span with **service** **`frontend-ui`** (inbound `/action/...` and outbound client to API).
-   - At least one span with **service** **`backend-app`** (inbound `/api/...` and internal work).
+   - At least one span with **service** **`frontend-ui`** (inbound `/action/...`, **`frontend: …`**, outbound client to API).
+   - At least one span with **service** **`backend-app`** (inbound `/api/...`, **`backend: …`**, internal work).
 5. **Confirm a single trace ID** — in the trace view, **every** span listed belongs to the **same** trace (Jaeger shows one **Trace ID** for the whole view; there must **not** be two unrelated traces for that single click).
 6. **Confirm the PostgreSQL-related span** — under **`backend-app`**, find a **client** span such as **`SELECT orders`** (or equivalent) with **`db.system=postgresql`**; it MUST appear **inside this same trace**, not in a second trace.
 7. **Interpretation:** **Multiple services** in **one** trace is **correct** distributed tracing behavior — **not** an error.
@@ -393,8 +478,8 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 2. Click **Get Order** **once** → expect the result page for **`ORD-001`**.
 3. In Jaeger, open **one** trace for that moment in time.
 4. Verify **Trace ID** is shared: copy the trace id from the UI if available; confirm **all** listed spans use that id (no second trace for the same click).
-5. Verify **service** **`frontend-ui`**: root / server span for **`/action/order/ORD-001`** (names may vary slightly) and **client** span toward **`/api/orders/ORD-001`**.
-6. Verify **service** **`backend-app`**: **server** span for **`GET /api/orders/ORD-001`**, then **service** spans (**`OrderService.getOrder`** etc.), then **`SELECT orders`** (or equivalent) with **`db.system=postgresql`** — **all in this one trace**.
+5. Verify **service** **`frontend-ui`**: server span for **`/action/order/ORD-001`**, **`frontend: load order page`**, **`frontend: call backend`**, and client toward **`/api/orders/ORD-001`** (auto names may vary slightly).
+6. Verify **service** **`backend-app`**: **server** span for **`GET /api/orders/ORD-001`**, then **`backend: get order`**, then **`SELECT orders`** with **`db.system=postgresql`** — **all in this one trace**.
 7. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** — each click is a **new** trace; repeat steps 3–6 per action.
 
 ---
@@ -403,7 +488,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 - **Top to bottom:** Time flows downward; **width** ≈ duration.
 - **Expected shape (Get Order):**  
-  **frontend-ui** server (wide) contains **frontend-ui** client (narrower) → **backend-app** server → **OrderService.getOrder** → **`SELECT orders`** (often short but visible).
+  **frontend-ui** server (wide) contains **`frontend: …`** + **client** (narrower) → **backend-app** server → **`backend: get order`** → **`SELECT orders`** (often short but visible).
 - **Latency:** Sum of **network + JVM + JDBC + Postgres**; DB span width is **query + round-trip**; missing widening in DB layer may mean the query is fast or the span is missing (see **Database Span Visibility**).
 - **Missing DB span:** Usually **instrumentation** not reaching JPA (here mitigated by **manual** spans); if **only** auto-instrumentation were used, missing JDBC spans would point to disabled observations or unsupported stack.
 
@@ -420,7 +505,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 | Frontend route | `oc get route frontend-ui -n observability-demo` |
 | UI smoke | Browser: click all three actions |
 | Jaeger | **Tracing Testing** + **UI Click Trace Testing** |
-| Different `service.name` | Filter by **`frontend-ui`** vs **`backend-app`** in Jaeger service list |
+| Different `service.name` | Default: filter **`frontend-ui`** vs **`backend-app`**; unified mode: **`order-demo-app`** only |
 
 ---
 
@@ -431,7 +516,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 1. **frontend-ui** — Server span for `/action/order/ORD-001`.  
 2. **frontend-ui** — Client span → **backend-app** `/api/orders/ORD-001`.  
 3. **backend-app** — Server span for API.  
-4. **backend-app** — `OrderService.getOrder` + **`SELECT orders`** (DB client).  
+4. **backend-app** — **`backend: get order`** + **`SELECT orders`** (DB client).  
 
 Minimum **three logical layers** visible: **UI pod**, **API pod**, **database client span** — all under the **same Jaeger trace** with **two services** (**`frontend-ui`**, **`backend-app`**). See **Same Trace ID Across Frontend and Backend**.
 

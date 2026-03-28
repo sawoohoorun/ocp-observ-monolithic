@@ -1,0 +1,11 @@
+# Optional profile: Unified Service View Mode (workshop / demo only).
+# Activate: SPRING_PROFILES_ACTIVE=unified-trace-view
+# Sets OTLP resource service.name to order-demo-app (via spring.application.name + explicit resource).
+spring:
+  application:
+    name: order-demo-app
+
+management:
+  opentelemetry:
+    resource-attributes:
+      "service.name": order-demo-app

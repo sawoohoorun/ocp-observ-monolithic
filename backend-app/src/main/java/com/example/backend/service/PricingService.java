@@ -24,7 +24,7 @@ public class PricingService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> getPrice(String sku) {
-    Span business = tracer.spanBuilder("PricingService.getPrice").startSpan();
+    Span business = tracer.spanBuilder("backend: calculate price").startSpan();
     try (Scope scope = business.makeCurrent()) {
       business.setAttribute("pricing.sku", sku);
 

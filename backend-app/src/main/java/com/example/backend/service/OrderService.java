@@ -24,7 +24,7 @@ public class OrderService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> getOrder(String id) {
-    Span business = tracer.spanBuilder("OrderService.getOrder").startSpan();
+    Span business = tracer.spanBuilder("backend: get order").startSpan();
     try (Scope scope = business.makeCurrent()) {
       business.setAttribute("order.id", id);
 
