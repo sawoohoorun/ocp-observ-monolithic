@@ -3,6 +3,8 @@
 FROM registry.access.redhat.com/ubi9/openjdk-21:latest AS build
 WORKDIR /workspace
 USER root
+# Maven Wrapper downloads a .tar.gz; tar invokes gzip — not present in minimal UBI by default.
+RUN microdnf install -y gzip tar && microdnf clean all
 COPY mvnw mvnw.cmd pom.xml ./
 COPY .mvn .mvn
 COPY src ./src

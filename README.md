@@ -707,6 +707,8 @@ The full tree is in Git. Critical pieces:
 FROM registry.access.redhat.com/ubi9/openjdk-21:latest AS build
 WORKDIR /workspace
 USER root
+# Maven Wrapper downloads a .tar.gz; tar invokes gzip — not present in minimal UBI by default.
+RUN microdnf install -y gzip tar && microdnf clean all
 COPY mvnw mvnw.cmd pom.xml ./
 COPY .mvn .mvn
 COPY src ./src
@@ -805,6 +807,7 @@ Minimum **three** meaningful layers: ingress + business + integration.
 |-------|--------|
 | Build fails cloning Git | Build pod logs; corporate proxy; private repo needs `sourceSecret`. |
 | Build fails Maven download | Cluster egress to Maven Central; use mirror and custom `settings.xml` via `BuildConfig` secret if required. |
+| `tar: gzip: Cannot exec` during `./mvnw` | The wrapper unpacks a `.tar.gz`; **gzip** was missing from the slim UBI image. The `Dockerfile` build stage runs `microdnf install -y gzip tar` before `mvnw`. |
 | `java:21` S2I missing | Prefer default **Docker** `BuildConfig` in this repo. |
 | Image pull errors on app | Ensure build **Complete** and tag **`demo-monolith:1.0.0`** exists: `oc describe is demo-monolith -n observability-demo`. |
 | No traces | Verify OTLP URL env on pod: `oc set env deployment/demo-monolith --list -n observability-demo`; collector logs; Tempo pod running. |
