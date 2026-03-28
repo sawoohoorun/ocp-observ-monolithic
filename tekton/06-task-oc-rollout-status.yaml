@@ -1,0 +1,26 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: oc-rollout-status
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: Wait until a Deployment reports a successful rollout (image triggers from ImageStreamTag).
+  params:
+    - name: namespace
+      type: string
+      default: observability-demo
+    - name: deployment
+      type: string
+    - name: timeout
+      type: string
+      default: 10m
+  steps:
+    - name: rollout
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        oc rollout status "deployment/$(params.deployment)" -n "$(params.namespace)" --timeout="$(params.timeout)"

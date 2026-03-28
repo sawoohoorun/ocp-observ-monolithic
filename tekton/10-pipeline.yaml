@@ -1,0 +1,138 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: observability-demo-delivery
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: >
+    Clone monorepo, verify layout, apply app YAML (Postgres + BC + Deployments preserving OTLP env),
+    build backend then frontend via OpenShift BuildConfig, wait for rollouts, smoke test, print summary.
+  params:
+    - name: git-url
+      type: string
+      description: Source repository URL for git clone
+    - name: git-revision
+      type: string
+      default: main
+      description: Branch, tag, or commit to check out after clone
+    - name: start-build-commit
+      type: string
+      default: ""
+      description: If set, passed to oc start-build --commit for both builds (omit for branch tip builds)
+    - name: namespace
+      type: string
+      default: observability-demo
+    - name: backend-app-name
+      type: string
+      default: backend-app
+      description: BuildConfig and Deployment name for the API
+    - name: frontend-app-name
+      type: string
+      default: frontend-ui
+      description: BuildConfig and Deployment name for the UI
+  workspaces:
+    - name: source
+      description: Shared workspace holding the cloned repository
+  tasks:
+    - name: clone-repository
+      taskRef:
+        name: git-clone-demo-repo
+      workspaces:
+        - name: output
+          workspace: source
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+
+    - name: verify-repo-layout
+      runAfter:
+        - clone-repository
+      taskRef:
+        name: verify-demo-repo-layout
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: apply-openshift-apps
+      runAfter:
+        - verify-repo-layout
+      taskRef:
+        name: apply-openshift-app-manifests
+      workspaces:
+        - name: source
+          workspace: source
+      params:
+        - name: namespace
+          value: $(params.namespace)
+
+    - name: build-backend
+      runAfter:
+        - apply-openshift-apps
+      taskRef:
+        name: oc-start-build-wait
+      params:
+        - name: namespace
+          value: $(params.namespace)
+        - name: buildconfig
+          value: $(params.backend-app-name)
+        - name: commit
+          value: $(params.start-build-commit)
+
+    - name: wait-backend-rollout
+      runAfter:
+        - build-backend
+      taskRef:
+        name: oc-rollout-status
+      params:
+        - name: namespace
+          value: $(params.namespace)
+        - name: deployment
+          value: $(params.backend-app-name)
+
+    - name: build-frontend
+      runAfter:
+        - wait-backend-rollout
+      taskRef:
+        name: oc-start-build-wait
+      params:
+        - name: namespace
+          value: $(params.namespace)
+        - name: buildconfig
+          value: $(params.frontend-app-name)
+        - name: commit
+          value: $(params.start-build-commit)
+
+    - name: wait-frontend-rollout
+      runAfter:
+        - build-frontend
+      taskRef:
+        name: oc-rollout-status
+      params:
+        - name: namespace
+          value: $(params.namespace)
+        - name: deployment
+          value: $(params.frontend-app-name)
+
+    - name: run-smoke-tests
+      runAfter:
+        - wait-frontend-rollout
+      taskRef:
+        name: frontend-smoke-test
+      params:
+        - name: namespace
+          value: $(params.namespace)
+        - name: frontend-service
+          value: $(params.frontend-app-name)
+
+  finally:
+    - name: emit-summary
+      taskRef:
+        name: emit-delivery-summary
+      params:
+        - name: namespace
+          value: $(params.namespace)

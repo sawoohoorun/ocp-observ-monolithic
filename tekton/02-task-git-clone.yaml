@@ -1,0 +1,35 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone-demo-repo
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: Clone the monorepo (frontend-ui, backend-app, openshift) into the shared workspace.
+  params:
+    - name: url
+      description: Git repository URL (HTTPS or SSH if cluster supports it)
+      type: string
+    - name: revision
+      description: Branch, tag, or commit to check out after clone
+      type: string
+      default: main
+  workspaces:
+    - name: output
+      description: Empty workspace; repository root is placed here
+  steps:
+    - name: clone
+      image: registry.access.redhat.com/ubi9/ubi:latest
+      securityContext:
+        runAsNonRoot: false
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        cd "$(workspaces.output.path)"
+        rm -rf ./* ./.??* 2>/dev/null || true
+        dnf install -y git-core >/dev/null
+        git clone "$(params.url)" .
+        git checkout "$(params.revision)"
+        echo "Cloned $(params.url) at $(git rev-parse --short HEAD)"

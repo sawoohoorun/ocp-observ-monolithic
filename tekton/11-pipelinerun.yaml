@@ -1,0 +1,31 @@
+---
+# Example PipelineRun — copy and edit, or use `tkn pipeline start` (see tekton/README.md).
+# Workspace: emptyDir avoids a PVC; for very large repos use a volumeClaimTemplate instead.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: observability-demo-delivery-
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  pipelineRef:
+    name: observability-demo-delivery
+  taskRunTemplate:
+    serviceAccountName: observability-demo-pipeline
+  params:
+    - name: git-url
+      value: https://github.com/sawoohoorun/ocp-observ-monolithic.git
+    - name: git-revision
+      value: main
+    - name: start-build-commit
+      value: ""
+    - name: namespace
+      value: observability-demo
+    - name: backend-app-name
+      value: backend-app
+    - name: frontend-app-name
+      value: frontend-ui
+  workspaces:
+    - name: source
+      emptyDir: {}

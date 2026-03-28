@@ -1,0 +1,35 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: emit-delivery-summary
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: Print routes, ImageStream tags, and manual Jaeger verification hints (typically used in a Pipeline finally block).
+  params:
+    - name: namespace
+      type: string
+      default: observability-demo
+  steps:
+    - name: summary
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        NS="$(params.namespace)"
+        echo "========== Observability demo delivery summary =========="
+        echo "Namespace: ${NS}"
+        echo ""
+        echo "--- Routes (HTTPS) ---"
+        oc get routes -n "${NS}" -o wide || true
+        echo ""
+        echo "--- ImageStream tags ---"
+        oc get istag -n "${NS}" | grep -E 'NAME|frontend-ui|backend-app' || true
+        echo ""
+        echo "--- Manual trace check (Jaeger UI) ---"
+        echo "1) Open frontend route host from above; click Get Order / Inventory / Price."
+        echo "2) Open Jaeger UI route; search services frontend-ui and backend-app."
+        echo "3) Expect 3+ logical layers: UI server+client, backend HTTP+service, SELECT * (postgresql)."
+        echo "=========================================================="

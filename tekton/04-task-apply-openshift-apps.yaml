@@ -1,0 +1,43 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: apply-openshift-app-manifests
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: >
+    Idempotent apply of PostgreSQL and application BuildConfigs/Deployments/Services/Routes from the clone.
+    Does not apply operators, Tempo, or the collector (platform stack stays out of the pipeline).
+  params:
+    - name: namespace
+      type: string
+      default: observability-demo
+  workspaces:
+    - name: source
+  steps:
+    - name: apply-and-wait-postgres
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        NS="$(params.namespace)"
+        ROOT="$(workspaces.source.path)"
+        oc apply -f "${ROOT}/openshift/40-postgres.yaml" -n "${NS}"
+        oc rollout status deployment/postgres -n "${NS}" --timeout=300s
+    - name: apply-build-and-runtime
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        NS="$(params.namespace)"
+        ROOT="$(workspaces.source.path)"
+        oc apply -f "${ROOT}/openshift/30-backend-buildconfig.yaml" -n "${NS}"
+        oc apply -f "${ROOT}/openshift/32-backend-service.yaml" -n "${NS}"
+        oc apply -f "${ROOT}/openshift/31-backend-deployment.yaml" -n "${NS}"
+        oc apply -f "${ROOT}/openshift/20-ui-buildconfig.yaml" -n "${NS}"
+        oc apply -f "${ROOT}/openshift/22-ui-service.yaml" -n "${NS}"
+        oc apply -f "${ROOT}/openshift/23-ui-route.yaml" -n "${NS}"
+        oc apply -f "${ROOT}/openshift/21-ui-deployment.yaml" -n "${NS}"
+        echo "Application manifests applied (tracing env preserved from Git YAML)."

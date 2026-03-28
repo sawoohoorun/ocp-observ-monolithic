@@ -1,0 +1,42 @@
+---
+# Namespace-scoped permissions for Tekton to drive BuildConfigs, rollouts, and app YAML from the cloned repo.
+# No cluster-admin, no SCC changes — the pipeline runs as a normal namespaced workload.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: observability-demo-pipeline
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "secrets", "serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildconfigs", "builds"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["image.openshift.io"]
+    resources: ["imagestreams", "imagestreamtags", "imagestreamimages"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: observability-demo-pipeline
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: observability-demo-pipeline
+subjects:
+  - kind: ServiceAccount
+    name: observability-demo-pipeline
+    namespace: observability-demo

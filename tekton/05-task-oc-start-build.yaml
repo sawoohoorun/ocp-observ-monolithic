@@ -1,0 +1,34 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: oc-start-build-wait
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: Run OpenShift binary build for a BuildConfig and wait for completion (Option A — cluster BuildConfig owns the image).
+  params:
+    - name: namespace
+      type: string
+      default: observability-demo
+    - name: buildconfig
+      type: string
+    - name: commit
+      description: If non-empty, passed to oc start-build --commit (must exist in the BuildConfig Git history)
+      type: string
+      default: ""
+  steps:
+    - name: start-build
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        NS="$(params.namespace)"
+        BC="$(params.buildconfig)"
+        REV="$(params.commit)"
+        if [ -n "${REV}" ]; then
+          oc start-build "${BC}" -n "${NS}" --commit="${REV}" --wait --follow
+        else
+          oc start-build "${BC}" -n "${NS}" --wait --follow
+        fi

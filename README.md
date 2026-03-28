@@ -103,6 +103,7 @@ The repository is the application source:
 - **`frontend-ui/`** — Thymeleaf UI + `RestClient` to backend.
 - **`backend-app/`** — REST API, JPA entities/repositories, traced services.
 - **`openshift/`** — All deploy/build/operator operand YAML for this demo.
+- **`tekton/`** — OpenShift Pipelines Tasks, `Pipeline`, sample `PipelineRun`, and **`tekton/README.md`** (CI/CD).
 
 The previous single **`spring-monolith`** tree was **removed** in favor of this split.
 
@@ -114,6 +115,7 @@ The previous single **`spring-monolith`** tree was **removed** in favor of this 
 ├── backend-app/           # Maven, Spring Boot API + JPA
 ├── frontend-ui/           # Maven, Spring Boot + Thymeleaf
 ├── openshift/             # Namespaces, operators, Tempo, Collector, Postgres, builds, Deployments, Routes
+├── tekton/                # Tekton pipeline + tasks (optional automation)
 ├── OCP-4.18-Observability-Demo-Deployment.md
 └── README.md              # kept in sync with this guide
 ```
@@ -435,6 +437,12 @@ oc start-build frontend-ui -n observability-demo --follow
 oc rollout status deployment/backend-app -n observability-demo --timeout=300s
 oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
 ```
+
+---
+
+## Tekton CI/CD (optional)
+
+Install **OpenShift Pipelines**, then apply **`tekton/`** and follow **`tekton/README.md`**. Full architecture, parameters, validation, and troubleshooting are in **`OCP-4.18-Observability-Demo-Deployment.md`** under **Tekton CI/CD (OpenShift Pipelines)**.
 
 ---
 

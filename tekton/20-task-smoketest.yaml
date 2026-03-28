@@ -1,0 +1,46 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: frontend-smoke-test
+  namespace: observability-demo
+  labels:
+    app.kubernetes.io/part-of: observability-demo
+spec:
+  description: >
+    In-cluster HTTP smoke against the frontend Service (after backend is ready).
+    Jaeger trace shape (frontend-ui + backend-app + postgres SQL span) is validated manually in the UI.
+  params:
+    - name: namespace
+      type: string
+      default: observability-demo
+    - name: frontend-service
+      type: string
+      default: frontend-ui
+  steps:
+    - name: http-smoke
+      image: registry.access.redhat.com/ubi9/ubi:latest
+      securityContext:
+        runAsNonRoot: false
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        dnf install -y curl-minimal >/dev/null
+        NS="$(params.namespace)"
+        SVC="$(params.frontend-service)"
+        BASE="http://${SVC}.${NS}.svc.cluster.local:8080"
+        code_r=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}/actuator/health/readiness")
+        test "${code_r}" = "200" || { echo "readiness HTTP ${code_r}"; exit 1; }
+        code_a=$(curl -s -o /dev/null -w "%{http_code}" "${BASE}/action/order/ORD-001")
+        test "${code_a}" = "200" || { echo "Get Order HTTP ${code_a}"; exit 1; }
+        echo "OK: frontend readiness + Get Order returned HTTP 200"
+    - name: collector-log-hints
+      image: registry.redhat.io/openshift4/ose-cli:latest
+      script: |
+        #!/bin/bash
+        set +e
+        NS="$(params.namespace)"
+        echo "--- Optional: recent collector log lines mentioning traces/export (may be empty) ---"
+        oc logs -n "${NS}" -l app.kubernetes.io/name=otel-collector --tail=150 2>/dev/null | grep -iE 'trace|export|otlp|span' | tail -n 8 || true
+        echo "---"
+        echo "Next: open Jaeger UI route, run Get Order again, find a trace with UI + API + SELECT spans."
