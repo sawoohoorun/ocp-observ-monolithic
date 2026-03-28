@@ -3,7 +3,7 @@ server:
 
 spring:
   application:
-    name: frontend-ui
+    name: order-demo-app
   thymeleaf:
     cache: false
 
@@ -11,6 +11,9 @@ demo:
   backend-base-url: http://backend-app.observability-demo.svc.cluster.local:8080
 
 management:
+  opentelemetry:
+    resource-attributes:
+      service.name: order-demo-app
   endpoint:
     health:
       probes:

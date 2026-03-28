@@ -24,13 +24,17 @@ public class PricingService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> getPrice(String sku) {
-    Span business = tracer.spanBuilder("backend: calculate price").startSpan();
+    Span business =
+        tracer
+            .spanBuilder("backend: calculate price")
+            .setSpanKind(SpanKind.INTERNAL)
+            .startSpan();
     try (Scope scope = business.makeCurrent()) {
       business.setAttribute("pricing.sku", sku);
 
       Span db =
           tracer
-              .spanBuilder("SELECT pricing")
+              .spanBuilder("postgres: SELECT pricing")
               .setSpanKind(SpanKind.CLIENT)
               .setAttribute("db.system", "postgresql")
               .setAttribute("db.operation", "SELECT")

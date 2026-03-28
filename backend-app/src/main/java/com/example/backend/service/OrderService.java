@@ -24,13 +24,14 @@ public class OrderService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> getOrder(String id) {
-    Span business = tracer.spanBuilder("backend: get order").startSpan();
+    Span business =
+        tracer.spanBuilder("backend: load order").setSpanKind(SpanKind.INTERNAL).startSpan();
     try (Scope scope = business.makeCurrent()) {
       business.setAttribute("order.id", id);
 
       Span db =
           tracer
-              .spanBuilder("SELECT orders")
+              .spanBuilder("postgres: SELECT orders")
               .setSpanKind(SpanKind.CLIENT)
               .setAttribute("db.system", "postgresql")
               .setAttribute("db.operation", "SELECT")

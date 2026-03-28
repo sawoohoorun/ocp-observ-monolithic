@@ -24,13 +24,17 @@ public class InventoryService {
 
   @Transactional(readOnly = true)
   public Optional<Map<String, Object>> checkInventory(String sku) {
-    Span business = tracer.spanBuilder("backend: check inventory").startSpan();
+    Span business =
+        tracer
+            .spanBuilder("backend: calculate inventory")
+            .setSpanKind(SpanKind.INTERNAL)
+            .startSpan();
     try (Scope scope = business.makeCurrent()) {
       business.setAttribute("inventory.sku", sku);
 
       Span db =
           tracer
-              .spanBuilder("SELECT inventory")
+              .spanBuilder("postgres: SELECT inventory")
               .setSpanKind(SpanKind.CLIENT)
               .setAttribute("db.system", "postgresql")
               .setAttribute("db.operation", "SELECT")

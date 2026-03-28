@@ -3,7 +3,7 @@ server:
 
 spring:
   application:
-    name: backend-app
+    name: order-demo-app
   datasource:
     url: jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb
     username: demo
@@ -17,6 +17,9 @@ spring:
     show-sql: false
 
 management:
+  opentelemetry:
+    resource-attributes:
+      service.name: order-demo-app
   endpoint:
     health:
       probes:
