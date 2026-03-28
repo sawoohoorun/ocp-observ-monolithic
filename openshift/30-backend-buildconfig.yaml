@@ -24,7 +24,7 @@ spec:
     type: Git
     git:
       uri: https://github.com/sawoohoorun/ocp-observ-monolithic.git
-      ref: single-span
+      ref: auto-instrumentation
     contextDir: backend-app
   strategy:
     type: Docker

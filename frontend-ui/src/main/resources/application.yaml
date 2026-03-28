@@ -11,9 +11,6 @@ demo:
   backend-base-url: http://backend-app.observability-single-span.svc.cluster.local:8080
 
 management:
-  opentelemetry:
-    resource-attributes:
-      service.name: order-demo-app
   endpoint:
     health:
       probes:
@@ -22,9 +19,3 @@ management:
     web:
       exposure:
         include: health,info
-  tracing:
-    sampling:
-      probability: 1.0
-  otlp:
-    tracing:
-      endpoint: http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces

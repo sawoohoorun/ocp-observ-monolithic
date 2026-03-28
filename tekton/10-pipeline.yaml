@@ -17,7 +17,7 @@ spec:
       description: Source repository URL for git clone
     - name: git-revision
       type: string
-      default: single-span
+      default: auto-instrumentation
       description: Branch, tag, or commit to check out after clone
     - name: start-build-commit
       type: string

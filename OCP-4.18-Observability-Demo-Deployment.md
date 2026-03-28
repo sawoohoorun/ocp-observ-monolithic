@@ -4,7 +4,7 @@ Guide to deploy a **three-layer traceable demo** on **OpenShift Container Platfo
 
 Manifests live in **`openshift/`** in [github.com/sawoohoorun/ocp-observ-monolithic](https://github.com/sawoohoorun/ocp-observ-monolithic). This document describes **purpose**, **order of apply**, and **commands** — not full YAML dumps.
 
-> **Branch `single-span`:** All commands and manifests in this file use project **`observability-single-span`** (not **`observability-demo`**). Tracing layout: **`docs/single-span-tracing.md`**.
+> **Branches:** Project **`observability-single-span`** is used for **`single-span`** (manual Micrometer/OTel naming — **`docs/single-span-tracing.md`** on that branch) and **`auto-instrumentation`** (operator Java agent — **`docs/auto-instrumentation.md`**). Align your checkout with the branch you deploy.
 
 ---
 

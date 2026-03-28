@@ -1,6 +1,6 @@
 # OpenShift 4.18 Observability Demo — 3-Layer App, Tempo, Collector & Jaeger UI
 
-> **Git branch `single-span`:** Deploy into project **`observability-single-span`** (isolated from **`observability-demo`**). UI and API export traces as **one Jaeger service** (`order-demo-app`) — see **`docs/single-span-tracing.md`**.
+> **Git branch `auto-instrumentation`:** Same project **`observability-single-span`**. **Red Hat build of OpenTelemetry** [Java auto-instrumentation](https://developers.redhat.com/articles/2026/02/25/how-use-auto-instrumentation-opentelemetry) injects the **Java agent** into **`frontend-ui`** and **`backend-app`** pods; traces export as **`service.name` `order-demo-app`** — see **`docs/auto-instrumentation.md`**. (Manual Micrometer/OTel SDK naming lives on branch **`single-span`**.)
 
 Guide to deploy a **three-layer traceable demo** on **OpenShift Container Platform 4.18**: **frontend UI** (Spring MVC + Thymeleaf), **backend monolith** (Spring Boot + JPA + PostgreSQL), **PostgreSQL** (ephemeral `emptyDir` only), plus **TempoMonolithic**, **Red Hat build of OpenTelemetry Collector**, and **Jaeger UI** (query against Tempo). Application images are built **in-cluster** via **`BuildConfig`** + Git. **No Helm, no Argo CD, no PVCs.**
 
@@ -29,7 +29,7 @@ flowchart LR
   J -->|Query API| T
 ```
 
-- **Two OpenTelemetry producer Deployments** (**`frontend-ui`**, **`backend-app`**) → same **Collector** → **Tempo** → **Jaeger UI**; on **`single-span`**, both export **`service.name` `order-demo-app`**.
+- **Two Deployments** (**`frontend-ui`**, **`backend-app`**) run with **operator-injected Java auto-instrumentation** → OTLP to the same **Collector** → **Tempo** → **Jaeger UI**; both use **`service.name` `order-demo-app`** (from the **`Instrumentation`** CR).
 - **PostgreSQL** stores demo rows only; traces are **not** in Postgres.
 
 ---
@@ -38,8 +38,8 @@ flowchart LR
 
 | Layer | Workload | Responsibility |
 |-------|----------|----------------|
-| **1 — Frontend UI** | `frontend-ui` | Serves HTML with **Get Order / Check Inventory / Calculate Price** actions. Each action performs a **server-side** `RestClient` call to `backend-app` so **W3C `traceparent`** propagates and **one trace ID** spans UI + API + DB. On **`single-span`**, OTLP **`service.name`** is **`order-demo-app`** on both tiers (see **`docs/single-span-tracing.md`**). |
-| **2 — Backend monolith** | `backend-app` | REST `/api/...`, **controller** spans (auto), **service** spans (manual + business logic), **database client** spans (manual `SpanKind.CLIENT` around JPA reads + `db.*` attributes). |
+| **1 — Frontend UI** | `frontend-ui` | Serves HTML with **Get Order / Check Inventory / Calculate Price** actions. Each action performs a **server-side** `RestClient` call to `backend-app`. The **Java agent** propagates **W3C** context and emits **HTTP server / client** spans so **one trace ID** spans UI + API + DB. |
+| **2 — Backend monolith** | `backend-app` | REST `/api/...`; **JPA + JDBC** instrumented by the agent (**DB client** spans follow OpenTelemetry JDBC semantics). |
 | **3 — Data** | `postgres` | Single non-HA **Deployment**, **`emptyDir`** data volume, **init SQL** via ConfigMap → `docker-entrypoint-initdb.d`. |
 
 ---
@@ -47,7 +47,7 @@ flowchart LR
 ## Frontend UI Design
 
 - **Stack:** Spring Boot **3.4**, **Thymeleaf** (server-side rendering — no browser JS tracing required for the demo).
-- **Service name (this branch):** `spring.application.name: order-demo-app` → OTLP **`service.name`** **`order-demo-app`**.
+- **Service name (this branch):** **`order-demo-app`** via **`OTEL_SERVICE_NAME`** on the **`Instrumentation`** CR (keeps UI + API under **one** Jaeger service). `spring.application.name` is still **`order-demo-app`** for logging consistency only.
 - **Outbound calls:** `RestClient` to `demo.backend-base-url` (overridden in-cluster by **`DEMO_BACKEND_BASE_URL`** → `http://backend-app.observability-single-span.svc.cluster.local:8080`).
 - **User actions:** Links such as `/action/order/ORD-001`, `/action/inventory/SKU-100`, `/action/pricing/SKU-100` each trigger one backend round-trip and **one distributed trace** spanning UI + API + DB.
 
@@ -55,7 +55,7 @@ flowchart LR
 
 ## Backend Monolith Design
 
-- **Stack:** Spring Web, Actuator, **Data JPA**, **PostgreSQL** driver, **Micrometer tracing bridge → OTLP**.
+- **Stack:** Spring Web, Actuator, **Data JPA**, **PostgreSQL** driver. **No in-app OTLP exporter** on this branch — the **injected Java agent** exports traces.
 - **Service name (this branch):** **`order-demo-app`** (same resource as UI for Jaeger).
 - **APIs:** `GET /api/orders/{id}`, `GET /api/inventory/{sku}`, `GET /api/pricing/{sku}`.
 - **Layers:** `ApiController` → `OrderService` / `InventoryService` / `PricingService` → JPA repositories → PostgreSQL.
@@ -74,36 +74,32 @@ flowchart LR
 
 ## Cross-Service Trace Propagation
 
-1. **Browser → UI Deployment:** vanilla HTTP GET; Tomcat/Spring creates the **root SERVER** span (named e.g. **`app: get order`**) with **`service.name` `order-demo-app`**.
-2. **UI → API:** **`RestClient`** injects **`traceparent`**; backend Tomcat creates a **child SERVER** span for `/api/...` (contextual name **`step: process order`** / **`step: check inventory`** / **`step: calculate price`**; same trace id, same **`order-demo-app`** in Jaeger).
-3. **Backend:** **CLIENT** **`db: select …`** spans attach under the API **SERVER** span (no extra INTERNAL “backend:” wrapper).
-4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces`**.
+1. **Browser → UI Deployment:** HTTP GET; the **Java agent** creates the **root SERVER** span for the servlet/Spring MVC request (**span names follow agent + stable HTTP semconv**, not custom `app:` / `step:` labels from the **`single-span`** branch).
+2. **UI → API:** Agent-instrumented **`RestClient`** (and related HTTP client stack) propagates **`traceparent`**; the API pod’s agent creates **child SERVER** spans for `/api/...`.
+3. **Backend → Postgres:** JDBC is instrumented by the agent (**CLIENT**-style DB spans).
+4. **Export:** Each pod’s agent sends OTLP **HTTP** to **`http://otel-collector.observability-single-span.svc.cluster.local:4318`** (endpoint configured on the **`Instrumentation`** CR).
 
-**Correlation contract:** One user action MUST yield **one trace ID**. On branch **`single-span`**, both workloads export **`service.name` = `order-demo-app`** so Jaeger shows **one logical application** in the service list. Full span naming and verification: **`docs/single-span-tracing.md`**.
+**Correlation contract:** One user action MUST yield **one trace ID**. **`OTEL_SERVICE_NAME=order-demo-app`** on the **`Instrumentation`** CR keeps a **single Jaeger service** for both tiers. Details: **`docs/auto-instrumentation.md`**.
 
 ---
 
 ## Same trace ID and single Jaeger service (`order-demo-app`)
 
-**Tracing:** **`frontend-ui`** and **`backend-app`** `application.yaml` set **`spring.application.name: order-demo-app`** and **`management.opentelemetry.resource-attributes.service.name: order-demo-app`**. The browser hits the **UI Deployment**; **`RestClient`** calls the **backend Service**; W3C context continues the trace.
+**Tracing:** Pods are annotated for **`instrumentation.opentelemetry.io/inject-java: demo-java`**, referencing **`openshift/12-instrumentation.yaml`**. The **`Instrumentation`** CR sets **`OTEL_SERVICE_NAME`**, **`OTEL_EXPORTER_OTLP_ENDPOINT`**, **`OTEL_SEMCONV_STABILITY_OPT_IN=http`**, **propagators** (**`tracecontext`**, **`baggage`**), and a **sampler** (aligned with [Red Hat’s auto-instrumentation article](https://developers.redhat.com/articles/2026/02/25/how-use-auto-instrumentation-opentelemetry)).
 
-**Inbound UI (SERVER):** `UiServerObservationConvention` sets contextual names **`app: get order`**, **`app: check inventory`**, **`app: calculate price`** (per route).
-
-**Manual spans:** **`step: prepare request`** (**INTERNAL**) wraps the backend HTTP call. **`ApiServerObservationConfig`** names API **SERVER** spans **`step: process order`** / **`step: check inventory`** / **`step: calculate price`**. Services emit **CLIENT** **`db: select orders`** / **`db: select inventory`** / **`db: select pricing`** with **`db.*`** attributes.
-
-**Implementation requirement:** Preserve **W3C Trace Context** on the **frontend → backend** hop (**`traceparent`** on **`RestClient`**).
+**Application code:** No Micrometer OTLP bridge, no manual OpenTelemetry spans — the demo follows the **zero-code injection** model from the operator.
 
 ### Headers: `traceparent`, `tracestate`, and `baggage`
 
 | Mechanism | Role in this demo |
 |-----------|-------------------|
-| **`traceparent`** (W3C Trace Context) | **Required** on the wire. Injected on **`RestClient`**, extracted on the API server. |
+| **`traceparent`** (W3C Trace Context) | **Required** on the wire. Injected/extracted by the **Java agent** on outbound **`RestClient`** and inbound servlet traffic. |
 | **`tracestate`** | **Optional**; absence alone does not mean broken propagation. |
 | **W3C Baggage** | **Not used** in the default configuration. |
 
 ### Jaeger
 
-Filter **Service** **`order-demo-app`**; open a trace and confirm the hierarchy in **`docs/single-span-tracing.md`**.
+Filter **Service** **`order-demo-app`**; open a trace and confirm **one trace ID** and agent-generated HTTP + JDBC children — **`docs/auto-instrumentation.md`**.
 
 ### Troubleshooting split traces
 
@@ -113,9 +109,9 @@ See **Troubleshooting — distributed trace correlation** in the main table: mis
 
 ## Database Span Visibility in Jaeger
 
-- **Approach:** **Manual OpenTelemetry spans** (`SpanKind.CLIENT`) named **`db: select orders`**, **`db: select inventory`**, **`db: select pricing`**, with attributes **`db.system=postgresql`**, **`db.statement`**, **`db.sql.table`**.
-- **Why manual:** Guarantees a **visible SQL-layer span** in Jaeger for lab validation. Pure JPA/Micrometer JDBC auto-instrumentation varies by version; if those spans appear **in addition**, they are a bonus.
-- **Missing DB spans:** If you see backend HTTP + service spans but **no** `SELECT *` client spans, check **`OrderService`** / **`InventoryService`** / **`PricingService`** in `backend-app` or verify the deployment is running the expected image.
+- **Approach:** **Java agent JDBC** instrumentation (no manual `db:` spans in application code on this branch).
+- **Naming:** Span names and attributes follow the **agent** and **stable database semantic conventions** (see agent docs / Jaeger detail view).
+- **Missing DB spans:** Confirm the **injected** pod spec includes **`-javaagent:`** and **`OTEL_*`** env from the operator; check **`oc describe pod`** and agent logs if needed.
 
 ---
 
@@ -146,7 +142,7 @@ The previous single **`spring-monolith`** tree was **removed** in favor of this 
 ```text
 ├── backend-app/           # Maven, Spring Boot API + JPA
 ├── frontend-ui/           # Maven, Spring Boot + Thymeleaf
-├── openshift/             # Namespaces, operators, Tempo, Collector, Postgres, builds, Deployments, Routes
+├── openshift/             # Namespaces, operators, Tempo, Collector, Instrumentation, Postgres, builds, Deployments, Routes
 ├── tekton/                # Tekton pipeline + tasks (optional automation)
 ├── OCP-4.18-Observability-Demo-Deployment.md
 └── README.md              # kept in sync with this guide
@@ -158,10 +154,10 @@ The previous single **`spring-monolith`** tree was **removed** in favor of this 
 
 | Area | Change | Why |
 |------|--------|-----|
-| **Layout** | Replaced single `spring-monolith` with **`frontend-ui/`** + **`backend-app/`** | Separate deployments and routes; **`single-span`** uses one OTLP **`service.name`**. |
-| **Manifests** | Moved to **`openshift/`** with numbered files (`20`–`40`) | Matches OpenShift-focused layout you requested. |
-| **Backend** | JPA + Postgres + **`ApiServerObservationConfig`** + **CLIENT** **`db: select …`** per **`docs/single-span-tracing.md`** | One logical app waterfall in Jaeger. |
-| **Frontend** | Thymeleaf + **`RestClient`** + **`UiServerObservationConvention`** | **W3C** propagation + **SERVER** **`app: …`** roots (shared operation naming with the flow). |
+| **Layout** | Replaced single `spring-monolith` with **`frontend-ui/`** + **`backend-app/`** | Separate deployments and routes; unified **`order-demo-app`** via **`Instrumentation`**. |
+| **Manifests** | **`openshift/12-instrumentation.yaml`** + numbered `20`–`40` | Operator **`Instrumentation`** CR + injected workloads. |
+| **Backend** | JPA + Postgres; traces from **Java agent** only | Matches Red Hat **auto-instrumentation** flow. |
+| **Frontend** | Thymeleaf + **`RestClient`** | Agent instruments servlet + HTTP client. |
 | **Postgres** | New `40-postgres.yaml` | Ephemeral DB with seed data; **no PVC**. |
 
 ---
@@ -175,6 +171,7 @@ openshift/
 ├── 02-subscriptions.yaml
 ├── 10-tempo.yaml
 ├── 11-otel-collector.yaml
+├── 12-instrumentation.yaml     # Instrumentation CR (Java agent → OTLP collector)
 ├── 20-ui-buildconfig.yaml      # ImageStream + BuildConfig (frontend-ui)
 ├── 21-ui-deployment.yaml
 ├── 22-ui-service.yaml
@@ -197,10 +194,11 @@ openshift/
 | `02-subscriptions.yaml` | `tempo-product`, `opentelemetry-product` subscriptions. |
 | `10-tempo.yaml` | `TempoMonolithic` + **Jaeger UI Route** + memory storage. |
 | `11-otel-collector.yaml` | `OpenTelemetryCollector` OTLP in → Tempo gRPC out. |
-| `20-ui-buildconfig.yaml` | Git `contextDir: frontend-ui` → image **`frontend-ui:1.0.0`**. |
-| `21–23` | UI Deployment (OTLP + backend URL env), Service, **edge Route** (user-facing). |
-| `30-backend-buildconfig.yaml` | Git `contextDir: backend-app` → **`backend-app:1.0.0`**. |
-| `31–32` | Backend Deployment (`DB_PASSWORD` from Secret), ClusterIP **Service** (cluster-only). |
+| `12-instrumentation.yaml` | **`Instrumentation`** CR: Java agent, OTLP endpoint, **`OTEL_SERVICE_NAME`**, propagators, sampler. |
+| `20-ui-buildconfig.yaml` | Git `ref: auto-instrumentation`, `contextDir: frontend-ui` → **`frontend-ui:1.0.0`**. |
+| `21–23` | UI Deployment (**inject-java** annotation + backend URL), Service, **Route**. |
+| `30-backend-buildconfig.yaml` | Git `ref: auto-instrumentation`, `contextDir: backend-app` → **`backend-app:1.0.0`**. |
+| `31–32` | Backend Deployment (**inject-java** + `DB_PASSWORD`), ClusterIP **Service**. |
 | `40-postgres.yaml` | Postgres **emptyDir**, init schema/data, **Secret** password. |
 
 **Edit if needed:** `spec.source.git` in both `BuildConfig`s for forks/branches; Postgres **image** in `40-postgres.yaml` if Docker Hub is blocked.
@@ -242,6 +240,7 @@ Wait for **`Succeeded`**.
 ```bash
 oc apply -f openshift/10-tempo.yaml
 oc apply -f openshift/11-otel-collector.yaml
+oc apply -f openshift/12-instrumentation.yaml
 ```
 
 Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.enabled`). List routes: `oc get routes -n observability-single-span`.
@@ -297,37 +296,29 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 ---
 
-## OpenTelemetry in Code
+## OpenTelemetry in Code (this branch)
 
-**W3C trace context:** Implementations MUST keep **W3C Trace Context** (**`traceparent`**) on the **UI → API** HTTP request. This repository uses Spring Boot + Micrometer OTel bridge defaults; do not replace **`RestClient`** with a raw client that omits context injection without also wiring **Observations** / propagators.
+**Model:** **No** Micrometer OTLP bridge and **no** hand-written OpenTelemetry spans in the app — tracing is entirely from the **operator-injected Java agent**, as described in [How to use auto-instrumentation with OpenTelemetry](https://developers.redhat.com/articles/2026/02/25/how-use-auto-instrumentation-opentelemetry).
 
-### 1. Frontend UI tracing (server-side)
+**W3C trace context:** The agent injects and propagates **`traceparent`** on **`RestClient`** outbound calls and servlet inbound handling. Keep using Spring’s **`RestClient`** (`ClientConfig`); avoid raw HTTP clients that bypass the instrumented stack.
 
-- **Inbound HTTP:** Spring MVC / Tomcat creates a **SERVER** span per `/action/...`; contextual name from **`UiServerObservationConvention`** (**`app: get order`**, etc.). **`service.name`** = **`order-demo-app`**.
-- **Manual UI spans:** **`UiController`** adds **INTERNAL** **`step: prepare request`** around **`RestClient`**.
-- **Outbound HTTP:** **`RestClient`** to **`backend-app`** MUST run with the **active trace** so Micrometer injects **`traceparent`** (and optional **`tracestate`**) on the outbound call. **Requirement:** use the **instrumented** **`RestClient`** bean pattern (see `ClientConfig` / `UiController`); avoid ad-hoc **`HttpURLConnection`** or third-party clients that ignore context.
-- **Browser:** This UI is **not** a SPA making direct traced XHR/fetch to the API. The **browser** only does a **full-page GET** to **`frontend-ui`**; the **trace starts in the frontend service** when that request hits the pod. **Browser-to-backend direct** calls would require **browser instrumentation** (e.g. OpenTelemetry JS) **and** CORS/header rules to propagate **`traceparent`** — **out of scope** for the default demo by design.
+### 1. Frontend UI
 
-### 2. Backend app tracing
+- **Inbound:** Agent-backed **SERVER** spans for MVC/Tomcat (names follow **stable HTTP** semantics).
+- **Outbound:** Agent-backed **CLIENT** spans for the **`RestClient`** call to **`backend-app`**.
+- **Browser:** Still a **full-page GET** to **`frontend-ui`** only; the trace **starts** in the UI pod.
 
-- **Inbound HTTP:** MUST **extract** W3C context from headers and create the **server span** as a **child** of the frontend client span (Spring Boot server instrumentation does this when headers are present). Contextual operation name from **`ApiServerObservationConfig`**: **`step: process order`**, **`step: check inventory`**, **`step: calculate price`**.
-- **Database:** Manual **CLIENT** spans **`db: select …`** MUST use the **current** context so **Postgres-related spans** stay in the **same trace** as the HTTP request.
+### 2. Backend app
 
-### 3. Database spans in Jaeger
+- **Inbound:** Agent **SERVER** spans for `/api/...`.
+- **Database:** Agent **JDBC** spans under the request (Hibernate/JPA may add nested spans depending on agent version).
 
-- Implemented as **OpenTelemetry client spans** (see **Database Span Visibility in Jaeger**). Hibernate may add additional internal spans depending on version; the manual spans are the **contract** for the lab.
+### 3. Service naming and export
 
-### 4. Trace propagation (recap)
+- **`OTEL_SERVICE_NAME=order-demo-app`** is set on the shared **`Instrumentation`** CR (`openshift/12-instrumentation.yaml`).
+- **OTLP HTTP** endpoint for the agent: **`http://otel-collector.observability-single-span.svc.cluster.local:4318`** (same host as the collector **Service**; the agent appends the OTLP path).
 
-- **W3C Trace Context** on **frontend → backend** via Spring’s default propagators.
-- **Single trace** chain: UI **SERVER** `app: …` → **INTERNAL** `step: prepare request` → **CLIENT** HTTP → API **SERVER** `step: …` → **CLIENT** `db: select …` (all **one trace id**).
-
-### 5. Service naming
-
-- **Both pods:** **`order-demo-app`** via `spring.application.name` and **`management.opentelemetry.resource-attributes`**.
-- **Postgres-related spans** — same **trace id**; **`service.name`** **`order-demo-app`** (exported from the backend process).
-
-**OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces` on both Deployments.
+**Manual span naming** (`app: get order`, `step: …`, `db: select …`) is implemented on Git branch **`single-span`**, not here.
 
 ---
 
@@ -341,17 +332,17 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 ## Tracing Testing
 
-**Goal:** Prove **one trace ID** for **one** UI action, with **Service** **`order-demo-app`** and the span hierarchy in **`docs/single-span-tracing.md`**.
+**Goal:** Prove **one trace ID** for **one** UI action, with **Service** **`order-demo-app`**, using **Java auto-instrumentation** — **`docs/auto-instrumentation.md`**.
 
-**Look for:** **`app: get order`** (or inventory/pricing roots), **`step: prepare request`**, **`step: process order`** (or matching API step), **`db: select …`**.
+**Look for:** Agent-generated **HTTP SERVER** (UI), **HTTP CLIENT** (UI→API), **HTTP SERVER** (API), **JDBC** / DB-related **CLIENT** spans (exact names depend on agent + semconv version).
 
 1. **Trigger exactly one UI action** — e.g. open the **`frontend-ui`** Route and click **Get Order** once.
 2. **Open Jaeger UI** (Tempo-backed route in **`observability-single-span`**).
 3. **Service** = **`order-demo-app`** → **Find Traces** → open **one** trace.
-4. Confirm **one trace ID** for all spans and the parent/child shape in **`docs/single-span-tracing.md`**.
-5. Confirm **CLIENT** **`db: select …`** with **`db.system=postgresql`** in the **same** trace.
+4. Confirm **one trace ID** for all spans and a sensible parent/child waterfall (**`docs/auto-instrumentation.md`**).
+5. Confirm **database-related** child spans exist on the API side (attributes often include **`db.system`** when using stable DB conventions).
 
-**Additional checks:** **Collector:** `oc logs -n observability-single-span -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
+**Additional checks:** **`oc get instrumentation,pods -n observability-single-span`**; **`oc describe pod`** on an app pod and confirm **`-javaagent:`** + **`OTEL_*`** env. **Collector:** `oc logs -n observability-single-span -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** verify **`12-instrumentation.yaml`** applied, operator **Succeeded**, injection annotations present, Collector + Tempo **Ready**.
 
 **Jaeger search tip:** With a single **`service.name`**, the service list shows **`order-demo-app`** once; the trace detail still shows the full span tree.
 
@@ -363,18 +354,18 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 2. Click **Get Order** **once** → expect the result page for **`ORD-001`**.
 3. In Jaeger, open **one** trace for that moment in time.
 4. Verify **Trace ID** is shared: copy the trace id from the UI if available; confirm **all** listed spans use that id (no second trace for the same click).
-5. Verify **process** tags show **`order-demo-app`** for all spans; root **SERVER** **`app: get order`**; **INTERNAL** **`step: prepare request`**; **SERVER** **`step: process order`**; **CLIENT** **`db: select orders`** — **same trace ID**.
-7. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** — each click is a **new** trace; repeat steps 3–6 per action.
+5. Verify **process** tags show **`order-demo-app`** for all spans and **one trace ID** across UI + API + DB-style children (exact span names come from the **Java agent**).
+6. Repeat for **Check Inventory** (`SKU-100`) and **Calculate Price** — each click is a **new** trace; repeat steps 3–5 per action.
 
 ---
 
 ## Jaeger Waterfall Interpretation
 
 - **Top to bottom:** Time flows downward; **width** ≈ duration.
-- **Expected shape (Get Order):**  
-  **SERVER** **`app: get order`** → **INTERNAL** **`step: prepare request`** → **CLIENT** HTTP → **SERVER** **`step: process order`** → **CLIENT** **`db: select orders`** (plus any Micrometer default naming on the HTTP client span).
-- **Latency:** Sum of **network + JVM + JDBC + Postgres**; DB span width is **query + round-trip**; missing widening in DB layer may mean the query is fast or the span is missing (see **Database Span Visibility**).
-- **Missing DB span:** Usually **instrumentation** not reaching JPA (here mitigated by **manual** spans); if **only** auto-instrumentation were used, missing JDBC spans would point to disabled observations or unsupported stack.
+- **Expected shape (Get Order, auto-instrumentation):**  
+  **SERVER** (UI HTTP) → **CLIENT** (outbound to API) → **SERVER** (API HTTP) → **CLIENT** / nested spans (**JDBC** / DB). Names follow the **agent** and **OTEL_SEMCONV_STABILITY_OPT_IN=http** (see **`Instrumentation`** CR).
+- **Latency:** Sum of **network + JVM + JDBC + Postgres**; narrow DB spans often mean a fast query.
+- **Missing DB span:** Confirm **JDBC** instrumentation is enabled in the agent for your stack; **`oc describe pod`** on **`backend-app`** and operator logs if injection failed.
 
 ---
 
@@ -397,12 +388,12 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 **One user click (e.g. Get Order)** — **one trace ID** end to end:
 
-1. **SERVER** **`app: get order`** (UI pod).  
-2. **INTERNAL** **`step: prepare request`** + **CLIENT** HTTP to API.  
-3. **SERVER** **`step: process order`** (API pod).  
-4. **CLIENT** **`db: select orders`**.  
+1. **SERVER** — inbound HTTP to **`frontend-ui`** (agent).  
+2. **CLIENT** — **`RestClient`** call to **`backend-app`** (agent).  
+3. **SERVER** — inbound **`/api/orders/...`** on **`backend-app`** (agent).  
+4. **CLIENT** / DB — JDBC query to Postgres (agent).  
 
-All spans use **`service.name` `order-demo-app`** in Jaeger. See **`docs/single-span-tracing.md`**.
+All spans use **`service.name` `order-demo-app`** in Jaeger. See **`docs/auto-instrumentation.md`**.
 
 ---
 
@@ -415,20 +406,21 @@ All spans use **`service.name` `order-demo-app`** in Jaeger. See **`docs/single-
 | Postgres **CrashLoop** on restricted SCC | Try adjusting **image** or **securityContext** per cluster policy; ensure **`emptyDir`** and `PGDATA` subpath as in `40-postgres.yaml`. |
 | **ImagePullBackOff** for `postgres:16-alpine` | Use an internal mirror or Red Hat image; update `40-postgres.yaml`. |
 | Backend **unready** | Postgres not ready, wrong password, or DB not initialized — check `oc logs deploy/backend-app`. |
-| **No DB spans** | Confirm backend image includes **manual** spans in services; check Jaeger for collapsed child spans. |
+| **No DB spans** | Confirm **Java agent** injected on **`backend-app`**; JDBC instrumentation active; check Jaeger for collapsed child spans. |
+| **No `-javaagent:` / no `OTEL_*` on app pods** | Apply **`openshift/12-instrumentation.yaml`**; **`oc get instrumentation -n observability-single-span`**; ensure OpenTelemetry operator CSV **Succeeded** and **cert-manager** is healthy for webhooks. |
 | **`debug` exporter** errors on Collector | Switch **`debug`** → **`logging`** in `11-otel-collector.yaml` pipeline. |
 
 ### Troubleshooting — distributed trace correlation
 
 | Issue | Notes |
 |-------|--------|
-| **Two traces** for one UI click (frontend one id, backend another) | **`traceparent`** not received by **`backend-app`**: check **`RestClient`** is the instrumented bean; compare with **Same Trace ID Across Frontend and Backend**. Confirm no **manual HTTP** bypassing Micrometer. |
+| **Two traces** for one UI click (frontend one id, backend another) | **`traceparent`** not propagated on the UI→API hop: confirm **Java agent** is injected on **both** tiers and **`RestClient`** is used (agent-instrumented stack). Confirm no raw HTTP client bypassing instrumentation. |
 | **Headers not forwarded** | **Edge reverse proxy** / **API gateway** in front of UI or API must **forward** `traceparent` (and `tracestate` if used). OpenShift **Route** to the UI usually does not strip them; custom **Ingress** annotations or **corporate proxies** might. |
 | **`@Async` / reactive** breaks propagation | Context is **thread-local** / **Reactor**-scoped; async work must use **supported** context propagation (e.g. **`@Observed`**, **`ContextSnapshot`**, Reactor operators). This demo uses **sync** `RestClient` only. |
-| **Manual HTTP client** ignores propagation | **`HttpClient`**, raw **`RestTemplate`** without observation, or **Feign** without tracing deps may **omit** headers. Prefer **`RestClient`** + Boot observability or explicitly inject the **W3C propagator**. |
+| **Manual HTTP client** ignores propagation | Raw **`HttpURLConnection`** or non-instrumented clients may **omit** headers. Prefer Spring **`RestClient`** with the **Java agent** present. |
 | **Service names correct but traces split** | Not a naming issue — **exporter** or **sampling** edge cases (rare with probability `1.0`), or **two different requests** (double fetch, prefetch). Use **one** deliberate click and match **timestamps**. |
 | **Jaeger search** | Use service **`order-demo-app`**; opening a trace shows **all** spans for that trace id. |
-| **Spans exist but DB span in “another” trace** | Usually **two separate HTTP requests** or backend **creating a new root** for DB work — verify manual spans use **current context** (this repo wraps JPA calls in the request thread). |
+| **Spans exist but DB span in “another” trace** | Usually **two separate HTTP requests** or failed context propagation into JDBC (rare with agent on sync request path). |
 
 ---
 
@@ -443,6 +435,7 @@ oc delete -f openshift/31-backend-deployment.yaml --ignore-not-found
 oc delete -f openshift/30-backend-buildconfig.yaml --ignore-not-found
 oc delete -f openshift/20-ui-buildconfig.yaml --ignore-not-found
 oc delete -f openshift/40-postgres.yaml --ignore-not-found
+oc delete -f openshift/12-instrumentation.yaml --ignore-not-found
 oc delete -f openshift/11-otel-collector.yaml --ignore-not-found
 oc delete -f openshift/10-tempo.yaml --ignore-not-found
 oc delete project observability-single-span
@@ -459,6 +452,7 @@ oc apply -f openshift/02-subscriptions.yaml
 # wait for CSVs Succeeded
 oc apply -f openshift/10-tempo.yaml
 oc apply -f openshift/11-otel-collector.yaml
+oc apply -f openshift/12-instrumentation.yaml
 oc apply -f openshift/40-postgres.yaml
 oc rollout status deployment/postgres -n observability-single-span --timeout=300s
 oc apply -f openshift/30-backend-buildconfig.yaml
@@ -500,7 +494,7 @@ Install **OpenShift Pipelines**, then apply **`tekton/`** and follow **`tekton/R
 
 **Red Hat build of OpenTelemetry:** **OperatorHub** → **Red Hat build of OpenTelemetry** → **`openshift-opentelemetry-operator`**, **stable**, **Automatic**.
 
-Then apply **`openshift/10-tempo.yaml`**, **`11-otel-collector.yaml`**, and the rest via CLI as above.
+Then apply **`openshift/10-tempo.yaml`**, **`11-otel-collector.yaml`**, **`12-instrumentation.yaml`**, and the rest via CLI as above.
 
 ---
 
@@ -516,7 +510,7 @@ open "https://${HOST}/"
 
 ## OpenTelemetry in Code (recap)
 
-- **frontend-ui** + **backend-app**: Micrometer **OTLP HTTP** → **`otel-collector.observability-single-span.svc.cluster.local:4318`**.  
-- **Propagation:** **W3C** on **RestClient** from UI to API.  
-- **DB:** **Manual** `SpanKind.CLIENT` spans with **`db.*`** attributes on **`backend-app`**.  
-- **Jaeger:** Queries **Tempo**; filter **`order-demo-app`** (this branch).
+- **frontend-ui** + **backend-app**: **Java auto-instrumentation** (operator) → OTLP **HTTP** **`otel-collector.observability-single-span.svc.cluster.local:4318`**.  
+- **Propagation:** **W3C** **`tracecontext`** (+ **`baggage`** on the **`Instrumentation`** CR) on **RestClient** and servlets.  
+- **DB:** **Agent JDBC** spans on **`backend-app`**.  
+- **Jaeger:** Queries **Tempo**; filter **`order-demo-app`**.

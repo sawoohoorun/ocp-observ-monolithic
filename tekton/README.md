@@ -2,7 +2,7 @@
 
 This folder contains a **demo-friendly** Tekton `Pipeline` that automates clone → layout check → **apply app YAML from Git** → **OpenShift `BuildConfig` builds** (backend then frontend) → rollout waits → in-cluster smoke test → summary.
 
-**Prerequisite:** [OpenShift Pipelines](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/cicd/pipelines) (Tekton) installed on the cluster. The pipeline assumes **operators, Tempo, and the OpenTelemetry Collector** are already applied (`openshift/00`–`11`); it does **not** reinstall them.
+**Prerequisite:** [OpenShift Pipelines](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/cicd/pipelines) (Tekton) installed on the cluster. The pipeline assumes **operators, Tempo, and the OpenTelemetry Collector** are already applied (`openshift/00`–`11`); the **`prepare-demo-repo-and-apply`** Task applies **`12-instrumentation.yaml`** from the cloned repo before app **BuildConfig** / **Deployment** manifests.
 
 ## File tree
 

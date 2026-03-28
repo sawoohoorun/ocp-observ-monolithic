@@ -54,7 +54,7 @@ spec:
         test -d "${ROOT}/frontend-ui" || { echo "missing frontend-ui/"; exit 1; }
         test -d "${ROOT}/backend-app" || { echo "missing backend-app/"; exit 1; }
         test -d "${ROOT}/openshift" || { echo "missing openshift/"; exit 1; }
-        for f in 40-postgres.yaml 30-backend-buildconfig.yaml 31-backend-deployment.yaml 20-ui-buildconfig.yaml 21-ui-deployment.yaml; do
+        for f in 12-instrumentation.yaml 40-postgres.yaml 30-backend-buildconfig.yaml 31-backend-deployment.yaml 20-ui-buildconfig.yaml 21-ui-deployment.yaml; do
           test -f "${ROOT}/openshift/${f}" || { echo "missing openshift/${f}"; exit 1; }
         done
         echo "Repository layout OK"
@@ -74,6 +74,7 @@ spec:
         set -euo pipefail
         NS="$(params.namespace)"
         ROOT="$(workspaces.source.path)"
+        oc apply -f "${ROOT}/openshift/12-instrumentation.yaml" -n "${NS}"
         oc apply -f "${ROOT}/openshift/30-backend-buildconfig.yaml" -n "${NS}"
         oc apply -f "${ROOT}/openshift/32-backend-service.yaml" -n "${NS}"
         oc apply -f "${ROOT}/openshift/31-backend-deployment.yaml" -n "${NS}"

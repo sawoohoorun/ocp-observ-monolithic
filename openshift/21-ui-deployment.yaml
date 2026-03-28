@@ -21,6 +21,9 @@ spec:
         app.kubernetes.io/name: frontend-ui
         app.kubernetes.io/part-of: observability-single-span
         app.kubernetes.io/component: ui
+      annotations:
+        instrumentation.opentelemetry.io/inject-java: "demo-java"
+        instrumentation.opentelemetry.io/container-names: "app"
     spec:
       serviceAccountName: default
       securityContext:
@@ -39,10 +42,6 @@ spec:
               value: "8080"
             - name: DEMO_BACKEND_BASE_URL
               value: "http://backend-app.observability-single-span.svc.cluster.local:8080"
-            - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
-              value: "http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces"
-            - name: MANAGEMENT_TRACING_SAMPLING_PROBABILITY
-              value: "1.0"
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

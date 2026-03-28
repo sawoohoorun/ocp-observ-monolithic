@@ -1,0 +1,31 @@
+# Red Hat build of OpenTelemetry — Java auto-instrumentation (Instrumentation CR).
+# See: https://developers.redhat.com/articles/2026/02/25/how-use-auto-instrumentation-opentelemetry
+#
+# Apply after the OpenTelemetry Operator is installed and after 11-otel-collector.yaml
+# (collector Service must exist). Pod annotation on app Deployments references this CR.
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: demo-java
+  namespace: observability-single-span
+  labels:
+    app.kubernetes.io/name: otel-instrumentation
+    app.kubernetes.io/part-of: observability-single-span
+spec:
+  exporter:
+    endpoint: http://otel-collector.observability-single-span.svc.cluster.local:4318
+    env:
+      - name: OTEL_SEMCONV_STABILITY_OPT_IN
+        value: http
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: parentbased_traceidratio
+    argument: "1"
+  java:
+    env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://otel-collector.observability-single-span.svc.cluster.local:4318
+      - name: OTEL_SERVICE_NAME
+        value: order-demo-app

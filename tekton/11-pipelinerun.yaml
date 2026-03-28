@@ -23,7 +23,7 @@ spec:
     - name: git-url
       value: https://github.com/sawoohoorun/ocp-observ-monolithic.git
     - name: git-revision
-      value: single-span
+      value: auto-instrumentation
     - name: start-build-commit
       value: ""
     - name: namespace

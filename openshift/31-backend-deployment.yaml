@@ -21,6 +21,9 @@ spec:
         app.kubernetes.io/name: backend-app
         app.kubernetes.io/part-of: observability-single-span
         app.kubernetes.io/component: api
+      annotations:
+        instrumentation.opentelemetry.io/inject-java: "demo-java"
+        instrumentation.opentelemetry.io/container-names: "app"
     spec:
       serviceAccountName: default
       securityContext:
@@ -42,10 +45,6 @@ spec:
                 secretKeyRef:
                   name: postgres-secret
                   key: password
-            - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
-              value: "http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces"
-            - name: MANAGEMENT_TRACING_SAMPLING_PROBABILITY
-              value: "1.0"
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness

@@ -17,9 +17,6 @@ spring:
     show-sql: false
 
 management:
-  opentelemetry:
-    resource-attributes:
-      service.name: order-demo-app
   endpoint:
     health:
       probes:
@@ -28,12 +25,3 @@ management:
     web:
       exposure:
         include: health,info
-  tracing:
-    sampling:
-      probability: 1.0
-  observations:
-    enable:
-      jdbc: true
-  otlp:
-    tracing:
-      endpoint: http://otel-collector.observability-single-span.svc.cluster.local:4318/v1/traces
