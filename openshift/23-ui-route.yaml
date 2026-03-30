@@ -2,10 +2,10 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: frontend-ui
-  namespace: observability-demo
+  namespace: dev
   labels:
     app.kubernetes.io/name: frontend-ui
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
 spec:
   to:
     kind: Service

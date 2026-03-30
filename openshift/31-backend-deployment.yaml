@@ -2,14 +2,14 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend-app
-  namespace: observability-demo
+  namespace: dev
   labels:
     app.kubernetes.io/name: backend-app
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
     app.kubernetes.io/component: api
   annotations:
     image.openshift.io/triggers: |-
-      [{"from":{"kind":"ImageStreamTag","name":"backend-app:1.0.0","namespace":"observability-demo"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
+      [{"from":{"kind":"ImageStreamTag","name":"backend-app:1.0.0","namespace":"dev"},"fieldPath":"spec.template.spec.containers[?(@.name==\"app\")].image"}]
 spec:
   replicas: 1
   selector:
@@ -19,7 +19,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: backend-app
-        app.kubernetes.io/part-of: observability-demo
+        app.kubernetes.io/part-of: dev
         app.kubernetes.io/component: api
     spec:
       serviceAccountName: default
@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: app
-          image: image-registry.openshift-image-registry.svc:5000/observability-demo/backend-app:1.0.0
+          image: image-registry.openshift-image-registry.svc:5000/dev/backend-app:1.0.0
           imagePullPolicy: Always
           ports:
             - name: http
@@ -43,7 +43,7 @@ spec:
                   name: postgres-secret
                   key: password
             - name: MANAGEMENT_OTLP_TRACING_ENDPOINT
-              value: "http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces"
+              value: "http://otel-collector.dev.svc.cluster.local:4318/v1/traces"
             - name: MANAGEMENT_TRACING_SAMPLING_PROBABILITY
               value: "1.0"
           readinessProbe:

@@ -4,15 +4,15 @@
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
-  generateName: observability-demo-delivery-
-  namespace: observability-demo
+  generateName: dev-delivery-
+  namespace: dev
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
 spec:
   pipelineRef:
-    name: observability-demo-delivery
+    name: dev-delivery
   taskRunTemplate:
-    serviceAccountName: observability-demo-pipeline
+    serviceAccountName: dev-pipeline
     # Helps Tekton entrypoint/init containers satisfy PSA restricted (with OpenShift Pipelines ≥ 1.14).
     podTemplate:
       securityContext:
@@ -27,7 +27,7 @@ spec:
     - name: start-build-commit
       value: ""
     - name: namespace
-      value: observability-demo
+      value: dev
     - name: backend-app-name
       value: backend-app
     - name: frontend-app-name

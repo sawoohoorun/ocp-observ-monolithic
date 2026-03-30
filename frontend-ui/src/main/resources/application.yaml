@@ -8,7 +8,7 @@ spring:
     cache: false
 
 demo:
-  backend-base-url: http://backend-app.observability-demo.svc.cluster.local:8080
+  backend-base-url: http://backend-app.dev.svc.cluster.local:8080
 
 management:
   endpoint:
@@ -24,4 +24,4 @@ management:
       probability: 1.0
   otlp:
     tracing:
-      endpoint: http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces
+      endpoint: http://otel-collector.dev.svc.cluster.local:4318/v1/traces

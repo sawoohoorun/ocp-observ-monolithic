@@ -3,19 +3,19 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: frontend-ui
-  namespace: observability-demo
+  namespace: dev
   labels:
     app.kubernetes.io/name: frontend-ui
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: frontend-ui
-  namespace: observability-demo
+  namespace: dev
   labels:
     app.kubernetes.io/name: frontend-ui
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
 spec:
   successfulBuildsHistoryLimit: 5
   failedBuildsHistoryLimit: 5

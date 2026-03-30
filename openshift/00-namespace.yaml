@@ -16,9 +16,9 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: observability-demo
+  name: dev
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted

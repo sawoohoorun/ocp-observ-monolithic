@@ -3,9 +3,9 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: emit-delivery-summary
-  namespace: observability-demo
+  namespace: dev
   labels:
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
 spec:
   description: Print routes, ImageStream tags, and manual Jaeger verification hints (typically used in a Pipeline finally block).
   stepTemplate:
@@ -20,7 +20,7 @@ spec:
   params:
     - name: namespace
       type: string
-      default: observability-demo
+      default: dev
   steps:
     - name: summary
       image: registry.redhat.io/openshift4/ose-cli:latest

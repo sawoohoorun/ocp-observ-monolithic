@@ -1,5 +1,7 @@
 # OpenShift 4.18 Observability Demo — 3-Layer App, Tempo, Collector & Jaeger UI
 
+> **Git branch `optimize`:** Application namespace **`dev`** (replaces **`observability-demo`** on **`main`**).
+
 Guide to deploy a **three-layer traceable demo** on **OpenShift Container Platform 4.18**: **frontend UI** (Spring MVC + Thymeleaf), **backend monolith** (Spring Boot + JPA + PostgreSQL), **PostgreSQL** (ephemeral `emptyDir` only), plus **TempoMonolithic**, **Red Hat build of OpenTelemetry Collector**, and **Jaeger UI** (query against Tempo). Application images are built **in-cluster** via **`BuildConfig`** + Git. **No Helm, no Argo CD, no PVCs.**
 
 Manifests live in **`openshift/`** in [github.com/sawoohoorun/ocp-observ-monolithic](https://github.com/sawoohoorun/ocp-observ-monolithic). This document describes **purpose**, **order of apply**, and **commands** — not full YAML dumps.
@@ -46,7 +48,7 @@ flowchart LR
 
 - **Stack:** Spring Boot **3.4**, **Thymeleaf** (server-side rendering — no browser JS tracing required for the demo).
 - **Service name:** `spring.application.name: frontend-ui` → **`service.name`** in exported traces.
-- **Outbound calls:** `RestClient` to `demo.backend-base-url` (overridden in-cluster by **`DEMO_BACKEND_BASE_URL`** → `http://backend-app.observability-demo.svc.cluster.local:8080`).
+- **Outbound calls:** `RestClient` to `demo.backend-base-url` (overridden in-cluster by **`DEMO_BACKEND_BASE_URL`** → `http://backend-app.dev.svc.cluster.local:8080`).
 - **User actions:** Links such as `/action/order/ORD-001`, `/action/inventory/SKU-100`, `/action/pricing/SKU-100` each trigger one backend round-trip and **one distributed trace** spanning UI + API + DB.
 
 ---
@@ -57,7 +59,7 @@ flowchart LR
 - **Service name:** `backend-app`.
 - **APIs:** `GET /api/orders/{id}`, `GET /api/inventory/{sku}`, `GET /api/pricing/{sku}`.
 - **Layers:** `ApiController` → `OrderService` / `InventoryService` / `PricingService` → JPA repositories → PostgreSQL.
-- **DSN:** `jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb` with password from **`DB_PASSWORD`** (Secret).
+- **DSN:** `jdbc:postgresql://postgres.dev.svc.cluster.local:5432/demodb` with password from **`DB_PASSWORD`** (Secret).
 
 ---
 
@@ -75,7 +77,7 @@ flowchart LR
 1. **Browser → frontend-ui:** vanilla HTTP GET; Tomcat/Spring creates the **root server span** for `/action/...` on **`frontend-ui`**.
 2. **frontend-ui → backend-app:** **`RestClient`** runs in the same request thread; Spring Boot observability injects **`traceparent`** (W3C) on the outbound request. The backend’s Tomcat creates a **child server span** linked to the same trace.
 3. **backend-app internal:** Service-layer manual spans and DB client spans attach **under** the backend HTTP span.
-4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces`**.
+4. **Export:** Both apps send OTLP **HTTP** to **`http://otel-collector.dev.svc.cluster.local:4318/v1/traces`**.
 
 **Correlation contract:** One user action MUST yield **one trace ID** spanning **`frontend-ui`** and **`backend-app`** (distinct services in Jaeger). Full semantics, headers, and failure modes are in **Same Trace ID Across Frontend and Backend** below.
 
@@ -173,18 +175,18 @@ Span **names** (**`SELECT orders`**, etc.) and **`db.*`** attributes identify **
 **Enable on OpenShift (both Deployments):**
 
 ```bash
-oc set env deployment/frontend-ui -n observability-demo SPRING_PROFILES_ACTIVE=unified-trace-view
-oc set env deployment/backend-app -n observability-demo SPRING_PROFILES_ACTIVE=unified-trace-view
-oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
-oc rollout status deployment/backend-app -n observability-demo --timeout=300s
+oc set env deployment/frontend-ui -n dev SPRING_PROFILES_ACTIVE=unified-trace-view
+oc set env deployment/backend-app -n dev SPRING_PROFILES_ACTIVE=unified-trace-view
+oc rollout status deployment/frontend-ui -n dev --timeout=300s
+oc rollout status deployment/backend-app -n dev --timeout=300s
 ```
 
 **Disable (return to default service names):**
 
 ```bash
-oc set env deployment/frontend-ui -n observability-demo SPRING_PROFILES_ACTIVE-
-oc set env deployment/backend-app -n observability-demo SPRING_PROFILES_ACTIVE-
-oc rollout restart deployment/frontend-ui deployment/backend-app -n observability-demo
+oc set env deployment/frontend-ui -n dev SPRING_PROFILES_ACTIVE-
+oc set env deployment/backend-app -n dev SPRING_PROFILES_ACTIVE-
+oc rollout restart deployment/frontend-ui deployment/backend-app -n dev
 ```
 
 If you already use other profiles, **merge** them (e.g. `SPRING_PROFILES_ACTIVE=prod,unified-trace-view`).
@@ -256,9 +258,9 @@ Auto-instrumentation still adds **HTTP** server/client spans (e.g. Tomcat **`GET
 ## OCP 4.18 Assumptions
 
 - Connected cluster, **`redhat-operators`**, **OperatorHub** for Path B.
-- **`cluster-admin`** for operators and **`observability-demo`**.
+- **`cluster-admin`** for operators and **`dev`**.
 - Build pods: Git + Maven Central; app pods: pull **internal registry** + optional **docker.io** for Postgres.
-- **Restricted** PSA on `observability-demo` (manifests use non-root, dropped caps, `emptyDir` `/tmp` for Java apps).
+- **Restricted** PSA on `dev` (manifests use non-root, dropped caps, `emptyDir` `/tmp` for Java apps).
 
 ---
 
@@ -335,7 +337,7 @@ tekton/
 
 | File | Purpose |
 |------|---------|
-| `00-namespace.yaml` | Operator + `observability-demo` namespaces. |
+| `00-namespace.yaml` | Operator + `dev` namespaces. |
 | `01-operatorgroup.yaml` | OperatorGroups for Tempo + OpenTelemetry operators. |
 | `02-subscriptions.yaml` | `tempo-product`, `opentelemetry-product` subscriptions. |
 | `10-tempo.yaml` | `TempoMonolithic` + **Jaeger UI Route** + memory storage. |
@@ -388,7 +390,7 @@ oc apply -f openshift/10-tempo.yaml
 oc apply -f openshift/11-otel-collector.yaml
 ```
 
-Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.enabled`). List routes: `oc get routes -n observability-demo`.
+Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.enabled`). List routes: `oc get routes -n dev`.
 
 ---
 
@@ -400,7 +402,7 @@ Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.
 
    ```bash
    oc apply -f openshift/40-postgres.yaml
-   oc rollout status deployment/postgres -n observability-demo --timeout=300s
+   oc rollout status deployment/postgres -n dev --timeout=300s
    ```
 
 2. **Register builds & start** (order flexible; backend is often built first):
@@ -408,16 +410,16 @@ Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.
    ```bash
    oc apply -f openshift/30-backend-buildconfig.yaml
    oc apply -f openshift/20-ui-buildconfig.yaml
-   oc start-build backend-app -n observability-demo --follow
-   oc start-build frontend-ui -n observability-demo --follow
+   oc start-build backend-app -n dev --follow
+   oc start-build frontend-ui -n dev --follow
    ```
 
 3. **Inspect:**
 
    ```bash
-   oc get builds -n observability-demo
-   oc describe is backend-app -n observability-demo
-   oc describe is frontend-ui -n observability-demo
+   oc get builds -n dev
+   oc describe is backend-app -n dev
+   oc describe is frontend-ui -n dev
    ```
 
 ---
@@ -427,14 +429,14 @@ Jaeger UI is enabled on **`TempoMonolithic`** (`spec.jaegerui.enabled` + `route.
 ```bash
 oc apply -f openshift/32-backend-service.yaml
 oc apply -f openshift/31-backend-deployment.yaml
-oc rollout status deployment/backend-app -n observability-demo --timeout=300s
+oc rollout status deployment/backend-app -n dev --timeout=300s
 
 oc apply -f openshift/22-ui-service.yaml
 oc apply -f openshift/23-ui-route.yaml
 oc apply -f openshift/21-ui-deployment.yaml
-oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
+oc rollout status deployment/frontend-ui -n dev --timeout=300s
 
-oc get route frontend-ui -n observability-demo -o jsonpath='{.spec.host}{"\n"}'
+oc get route frontend-ui -n dev -o jsonpath='{.spec.host}{"\n"}'
 ```
 
 Apply **Deployments only after** images exist (or expect short `ImagePullBackOff` until builds finish).
@@ -473,7 +475,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 - **`backend-app`** — `spring.application.name` in `backend-app`.
 - **Postgres-related spans** — same **trace id** as the backend HTTP span; **`service.name`** remains **`backend-app`** in default mode (or **`order-demo-app`** under **Unified Service View Mode**).
 
-**OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces` on both Deployments.
+**OTLP:** `MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector.dev.svc.cluster.local:4318/v1/traces` on both Deployments.
 
 ---
 
@@ -481,7 +483,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 - Configured on **`TempoMonolithic`** in `openshift/10-tempo.yaml` (`jaegerui.enabled`, `route.enabled`).
 - **Jaeger UI does not store traces** here — it **queries Tempo**.
-- Access: **Route** in `observability-demo` (plus OAuth). Fallback: `oc port-forward` to the Jaeger UI / query **Service** if routes are restricted.
+- Access: **Route** in `dev` (plus OAuth). Fallback: `oc port-forward` to the Jaeger UI / query **Service** if routes are restricted.
 
 ---
 
@@ -493,8 +495,8 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 
 **Unified Service View Mode:** Follow **Jaeger testing — Unified Service View Mode** (same steps, but search service **`order-demo-app`**).
 
-1. **Trigger exactly one UI action** — e.g. open **`frontend-ui`** Route (`oc get route frontend-ui -n observability-demo`) and click **Get Order** once (wait for the page to load). Each separate click creates a **new** trace; isolate **one** action for validation.
-2. **Open Jaeger UI** (Tempo-backed route in **`observability-demo`**).
+1. **Trigger exactly one UI action** — e.g. open **`frontend-ui`** Route (`oc get route frontend-ui -n dev`) and click **Get Order** once (wait for the page to load). Each separate click creates a **new** trace; isolate **one** action for validation.
+2. **Open Jaeger UI** (Tempo-backed route in **`dev`**).
 3. **Find that trace** — search by time window and/or service **`frontend-ui`** or **`backend-app`**.
 4. **Open the trace detail** and confirm the waterfall includes spans from **both** services:
    - At least one span with **service** **`frontend-ui`** (inbound `/action/...`, **`frontend: …`**, outbound client to API).
@@ -503,7 +505,7 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 6. **Confirm the PostgreSQL-related span** — under **`backend-app`**, find a **client** span such as **`SELECT orders`** (or equivalent) with **`db.system=postgresql`**; it MUST appear **inside this same trace**, not in a second trace.
 7. **Interpretation:** **Multiple services** in **one** trace is **correct** distributed tracing behavior — **not** an error.
 
-**Additional checks:** **Collector:** `oc logs -n observability-demo -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
+**Additional checks:** **Collector:** `oc logs -n dev -l app.kubernetes.io/name=otel-collector --tail=80`. **If no traces:** **Troubleshooting** + OTLP env on both Deployments, Collector + Tempo pods, Postgres **Ready**. **Load (optional):** repeat clicks or `curl` the **frontend** Route (note: each request = its own trace).
 
 **Jaeger search tip:** Searching or filtering by **one** service only **limits which traces appear in the list**; opening a trace still shows **all** spans (all services) for that trace ID. If you only see one service in the **trace detail**, propagation is likely broken — see **Troubleshooting — distributed trace correlation**.
 
@@ -536,10 +538,10 @@ Apply **Deployments only after** images exist (or expect short `ImagePullBackOff
 | Goal | Command / action |
 |------|------------------|
 | Operators | `oc get csv -n openshift-tempo-operator` ; `oc get csv -n openshift-opentelemetry-operator` |
-| Tempo / Collector | `oc get tempomonolithic,pods,opentelemetrycollector -n observability-demo` |
-| Postgres | `oc get pods -l app.kubernetes.io/name=postgres -n observability-demo` ; `oc logs deploy/postgres -n observability-demo --tail=20` |
-| Backend | `oc get pods -l app.kubernetes.io/name=backend-app -n observability-demo` ; `curl -sS http://$(oc get svc backend-app -o jsonpath='{.spec.clusterIP}' -n observability-demo):8080/api/orders/ORD-001` from a debug pod or port-forward |
-| Frontend route | `oc get route frontend-ui -n observability-demo` |
+| Tempo / Collector | `oc get tempomonolithic,pods,opentelemetrycollector -n dev` |
+| Postgres | `oc get pods -l app.kubernetes.io/name=postgres -n dev` ; `oc logs deploy/postgres -n dev --tail=20` |
+| Backend | `oc get pods -l app.kubernetes.io/name=backend-app -n dev` ; `curl -sS http://$(oc get svc backend-app -o jsonpath='{.spec.clusterIP}' -n dev):8080/api/orders/ORD-001` from a debug pod or port-forward |
+| Frontend route | `oc get route frontend-ui -n dev` |
 | UI smoke | Browser: click all three actions |
 | Jaeger | **Tracing Testing** + **UI Click Trace Testing** |
 | Different `service.name` | Filter by **`frontend-ui`** vs **`backend-app`** in Jaeger service list |
@@ -598,7 +600,7 @@ oc delete -f openshift/20-ui-buildconfig.yaml --ignore-not-found
 oc delete -f openshift/40-postgres.yaml --ignore-not-found
 oc delete -f openshift/11-otel-collector.yaml --ignore-not-found
 oc delete -f openshift/10-tempo.yaml --ignore-not-found
-oc delete project observability-demo
+oc delete project dev
 ```
 
 ---
@@ -613,7 +615,7 @@ oc apply -f openshift/02-subscriptions.yaml
 oc apply -f openshift/10-tempo.yaml
 oc apply -f openshift/11-otel-collector.yaml
 oc apply -f openshift/40-postgres.yaml
-oc rollout status deployment/postgres -n observability-demo --timeout=300s
+oc rollout status deployment/postgres -n dev --timeout=300s
 oc apply -f openshift/30-backend-buildconfig.yaml
 oc apply -f openshift/20-ui-buildconfig.yaml
 ```
@@ -633,10 +635,10 @@ oc apply -f openshift/21-ui-deployment.yaml
 ## Build and Deploy App
 
 ```bash
-oc start-build backend-app -n observability-demo --follow
-oc start-build frontend-ui -n observability-demo --follow
-oc rollout status deployment/backend-app -n observability-demo --timeout=300s
-oc rollout status deployment/frontend-ui -n observability-demo --timeout=300s
+oc start-build backend-app -n dev --follow
+oc start-build frontend-ui -n dev --follow
+oc rollout status deployment/backend-app -n dev --timeout=300s
+oc rollout status deployment/frontend-ui -n dev --timeout=300s
 ```
 
 ---
@@ -665,7 +667,7 @@ Manifests and tasks live under **`tekton/`**; see **`tekton/README.md`** for a c
 |--------|-------------------|------|
 | Git repository URL | `git-url` | Clone source for layout check and for `openshift/` apply |
 | Git revision / branch / tag / commit | `git-revision` | Checked out in the workspace after clone |
-| Target namespace | `namespace` | All `oc` and apply targets (default `observability-demo`) |
+| Target namespace | `namespace` | All `oc` and apply targets (default `dev`) |
 | Frontend app name | `frontend-app-name` | `BuildConfig` + `Deployment` + Service name (`frontend-ui`) |
 | Backend app name | `backend-app-name` | `BuildConfig` + `Deployment` + Service name (`backend-app`) |
 | Optional commit for binary builds | `start-build-commit` | If set, passed to **`oc start-build --commit`** for both builds |
@@ -707,17 +709,17 @@ flowchart TD
 
 | Resource | Name / pattern | Purpose |
 |----------|----------------|---------|
-| `ServiceAccount` | `observability-demo-pipeline` | Identity for all `TaskRun` pods |
-| `Role` + `RoleBinding` | `observability-demo-pipeline` | Namespace permissions for builds, deployments, routes, imagestreams, secrets/configmaps needed for apply |
+| `ServiceAccount` | `dev-pipeline` | Identity for all `TaskRun` pods |
+| `Role` + `RoleBinding` | `dev-pipeline` | Namespace permissions for builds, deployments, routes, imagestreams, secrets/configmaps needed for apply |
 | `Task` | `prepare-demo-repo-and-apply` (clone + verify + apply in **one pod**), `oc-start-build-wait`, `oc-rollout-status`, `frontend-smoke-test`, `emit-delivery-summary` | Reusable steps |
-| `Pipeline` | `observability-demo-delivery` | Ordered DAG + `finally` summary |
-| `PipelineRun` | e.g. `observability-demo-delivery-xxxxx` | One execution; binds workspace and parameters |
+| `Pipeline` | `dev-delivery` | Ordered DAG + `finally` summary |
+| `PipelineRun` | e.g. `dev-delivery-xxxxx` | One execution; binds workspace and parameters |
 | Workspace | `source` | Clone + `oc apply -f` paths under `$(workspaces.source.path)/openshift` |
 | Secrets (optional) | Git credentials | Only if `git-url` is private — attach to `ServiceAccount` or use a `git-clone` pattern with secret volume |
 
 **Bundled / catalog tasks:** This lab uses **custom Tasks** in `tekton/` (**`alpine/git`**, **`registry.redhat.io/openshift4/ose-cli`** for `oc`) so you are not tied to a specific **Tekton Hub** resolver version. Conceptually they replace bundles such as **`git-clone`** + **`openshift-client`** ClusterTasks — same ideas, fewer moving parts for a fresh cluster.
 
-**SCC / elevation:** Tasks run as **normal pods** in **`observability-demo`** using the pipeline **`ServiceAccount`**. **No custom SCC** or cluster-admin is required for the sample RBAC. If your cluster enforces **restricted** defaults, the stock `ose-cli` and UBI images are typically compatible; if pull fails, mirror images and edit task `image:` fields.
+**SCC / elevation:** Tasks run as **normal pods** in **`dev`** using the pipeline **`ServiceAccount`**. **No custom SCC** or cluster-admin is required for the sample RBAC. If your cluster enforces **restricted** defaults, the stock `ose-cli` and UBI images are typically compatible; if pull fails, mirror images and edit task `image:` fields.
 
 ---
 
@@ -743,7 +745,7 @@ flowchart TD
 | `git-url` | (required at start) | HTTPS or SSH URL your builders can reach |
 | `git-revision` | `main` | Branch, tag, or commit for `git checkout` after clone |
 | `start-build-commit` | `""` | If non-empty, **`oc start-build --commit`** for both `BuildConfig`s |
-| `namespace` | `observability-demo` | Target project |
+| `namespace` | `dev` | Target project |
 | `backend-app-name` | `backend-app` | Must match `BuildConfig` / `Deployment` metadata names |
 | `frontend-app-name` | `frontend-ui` | Same |
 
@@ -776,12 +778,12 @@ Edit **`tekton/11-pipelinerun.yaml`** first if your `git-url` / branch differ.
 **2. CLI (`tkn pipeline start`)**
 
 ```bash
-tkn pipeline start observability-demo-delivery -n observability-demo \
+tkn pipeline start dev-delivery -n dev \
   --showlog \
   -w name=source,emptyDir="" \
   -p git-url=https://github.com/sawoohoorun/ocp-observ-monolithic.git \
   -p git-revision=main \
-  -p namespace=observability-demo
+  -p namespace=dev
 ```
 
 **3. OpenShift web console:** **Pipelines** → **PipelineRuns** → **Create** / **Start** (select pipeline, bind workspace `source` to emptyDir or PVC, set parameters). See **Web console — Tekton** below.
@@ -834,12 +836,12 @@ tkn pipeline start observability-demo-delivery -n observability-demo \
 
 | Check | How |
 |-------|-----|
-| Pipeline defined | `tkn pipeline ls -n observability-demo` or `oc get pipelines.tekton.dev -n observability-demo` |
-| Run started | `oc get pipelineruns -n observability-demo` |
-| Tasks succeeded | `tkn pipelinerun describe <name> -n observability-demo` ; `oc get taskruns -n observability-demo` |
-| Builds succeeded | `oc get builds -n observability-demo` ; `oc logs build/<build-name> -n observability-demo` |
-| Deployments rolled out | `oc rollout status deployment/backend-app` / `frontend-ui` ; `oc get pods -n observability-demo` |
-| Routes reachable | `oc get route frontend-ui -n observability-demo` ; browser or `curl -k https://<host>/` |
+| Pipeline defined | `tkn pipeline ls -n dev` or `oc get pipelines.tekton.dev -n dev` |
+| Run started | `oc get pipelineruns -n dev` |
+| Tasks succeeded | `tkn pipelinerun describe <name> -n dev` ; `oc get taskruns -n dev` |
+| Builds succeeded | `oc get builds -n dev` ; `oc logs build/<build-name> -n dev` |
+| Deployments rolled out | `oc rollout status deployment/backend-app` / `frontend-ui` ; `oc get pods -n dev` |
+| Routes reachable | `oc get route frontend-ui -n dev` ; browser or `curl -k https://<host>/` |
 | Smoke task | Logs show **OK: frontend readiness + Get Order returned HTTP 200** |
 | Jaeger trace | **Tracing Testing** + **UI Click Trace Testing** sections in this guide |
 
@@ -848,7 +850,7 @@ tkn pipeline start observability-demo-delivery -n observability-demo \
 ```bash
 oc apply -f tekton/00-serviceaccount.yaml
 oc apply -f tekton/01-rbac.yaml
-oc delete task git-clone-demo-repo verify-demo-repo-layout apply-openshift-app-manifests -n observability-demo --ignore-not-found
+oc delete task git-clone-demo-repo verify-demo-repo-layout apply-openshift-app-manifests -n dev --ignore-not-found
 oc apply -f tekton/02-task-prepare-demo-repo-and-apply.yaml
 oc apply -f tekton/05-task-oc-start-build.yaml
 oc apply -f tekton/06-task-oc-rollout-status.yaml
@@ -856,16 +858,16 @@ oc apply -f tekton/07-task-emit-summary.yaml
 oc apply -f tekton/20-task-smoketest.yaml
 oc apply -f tekton/10-pipeline.yaml
 
-tkn pipeline ls -n observability-demo
-tkn pipeline start observability-demo-delivery -n observability-demo --showlog \
+tkn pipeline ls -n dev
+tkn pipeline start dev-delivery -n dev --showlog \
   -w name=source,emptyDir="" \
   -p git-url=https://github.com/sawoohoorun/ocp-observ-monolithic.git \
   -p git-revision=main
 
-oc get pipelineruns -n observability-demo
-tkn pipelinerun logs -f <pipelinerun-name> -n observability-demo
-oc get taskruns -n observability-demo
-oc describe pipelinerun <pipelinerun-name> -n observability-demo
+oc get pipelineruns -n dev
+tkn pipelinerun logs -f <pipelinerun-name> -n dev
+oc get taskruns -n dev
+oc describe pipelinerun <pipelinerun-name> -n dev
 ```
 
 ---
@@ -873,7 +875,7 @@ oc describe pipelinerun <pipelinerun-name> -n observability-demo
 ### Web Console — Tekton
 
 1. **Administrator** or **Developer** perspective → **Pipelines** (OpenShift Pipelines installed).  
-2. **Pipelines** page → confirm **`observability-demo-delivery`** exists in **`observability-demo`**.  
+2. **Pipelines** page → confirm **`dev-delivery`** exists in **`dev`**.  
 3. **Start** a run → set parameters (`git-url`, `git-revision`, …) and bind workspace **`source`** (**emptyDir** or PVC).  
 4. **PipelineRuns** → open your run → inspect **TaskRuns** and **Logs** per step.  
 5. After success: **Topology** or **Workloads** → **Deployments** **frontend-ui** / **backend-app**; **Networking** → **Routes** for the UI and Jaeger.
@@ -882,7 +884,7 @@ oc describe pipelinerun <pipelinerun-name> -n observability-demo
 
 ### Security and Permissions (pipeline ServiceAccount)
 
-The **`observability-demo-pipeline`** `Role` grants **namespace-scoped** verbs to manage **`BuildConfig`/`Build`**, **`ImageStream*`**, **`Deployment`**, **`Service`**, **`Route`**, and read/update **`ConfigMap`/`Secret`** as needed for **`oc apply`** of the demo manifests. It does **not** grant cluster-admin or operator CRDs in other namespaces.
+The **`dev-pipeline`** `Role` grants **namespace-scoped** verbs to manage **`BuildConfig`/`Build`**, **`ImageStream*`**, **`Deployment`**, **`Service`**, **`Route`**, and read/update **`ConfigMap`/`Secret`** as needed for **`oc apply`** of the demo manifests. It does **not** grant cluster-admin or operator CRDs in other namespaces.
 
 **If** you only run builds and rollouts (no apply), you could narrow rules — for this demo, **apply-from-Git** needs create/update on those types.
 
@@ -934,7 +936,7 @@ Then apply **`openshift/10-tempo.yaml`**, **`11-otel-collector.yaml`**, and the 
 ## Tracing Test Quickstart
 
 ```bash
-HOST=$(oc get route frontend-ui -n observability-demo -o jsonpath='{.spec.host}')
+HOST=$(oc get route frontend-ui -n dev -o jsonpath='{.spec.host}')
 open "https://${HOST}/"
 # Click "Get Order", then open Jaeger UI route → service frontend-ui / backend-app → Find Traces
 ```
@@ -943,7 +945,7 @@ open "https://${HOST}/"
 
 ## OpenTelemetry in Code (recap)
 
-- **frontend-ui** + **backend-app**: Micrometer **OTLP HTTP** → **`otel-collector.observability-demo.svc.cluster.local:4318`**.  
+- **frontend-ui** + **backend-app**: Micrometer **OTLP HTTP** → **`otel-collector.dev.svc.cluster.local:4318`**.  
 - **Propagation:** **W3C** on **RestClient** from UI to API.  
 - **DB:** **Manual** `SpanKind.CLIENT` spans with **`db.*`** attributes on **`backend-app`**.  
 - **Jaeger:** Queries **Tempo**; filter **`frontend-ui`** vs **`backend-app`** for layer proof.

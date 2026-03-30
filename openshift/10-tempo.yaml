@@ -2,10 +2,10 @@ apiVersion: tempo.grafana.com/v1alpha1
 kind: TempoMonolithic
 metadata:
   name: demo
-  namespace: observability-demo
+  namespace: dev
   labels:
     app.kubernetes.io/name: tempo
-    app.kubernetes.io/part-of: observability-demo
+    app.kubernetes.io/part-of: dev
 spec:
   managementState: Managed
   storage:

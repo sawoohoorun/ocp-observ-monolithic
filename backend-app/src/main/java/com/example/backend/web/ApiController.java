@@ -4,6 +4,7 @@ import com.example.backend.service.InventoryService;
 import com.example.backend.service.OrderService;
 import com.example.backend.service.PricingService;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -18,6 +19,7 @@ public class ApiController {
   private final InventoryService inventoryService;
   private final PricingService pricingService;
 
+  @Autowired
   public ApiController(
       OrderService orderService,
       InventoryService inventoryService,

@@ -5,7 +5,7 @@ spring:
   application:
     name: backend-app
   datasource:
-    url: jdbc:postgresql://postgres.observability-demo.svc.cluster.local:5432/demodb
+    url: jdbc:postgresql://postgres.dev.svc.cluster.local:5432/demodb
     username: demo
     password: ${DB_PASSWORD:demo}
     hikari:
@@ -33,4 +33,4 @@ management:
       jdbc: true
   otlp:
     tracing:
-      endpoint: http://otel-collector.observability-demo.svc.cluster.local:4318/v1/traces
+      endpoint: http://otel-collector.dev.svc.cluster.local:4318/v1/traces

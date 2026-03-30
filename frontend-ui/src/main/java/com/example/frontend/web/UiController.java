@@ -3,6 +3,7 @@ package com.example.frontend.web;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Scope;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -16,6 +17,7 @@ public class UiController {
   private final RestClient backendRestClient;
   private final Tracer tracer;
 
+  @Autowired
   public UiController(RestClient backendRestClient, Tracer tracer) {
     this.backendRestClient = backendRestClient;
     this.tracer = tracer;

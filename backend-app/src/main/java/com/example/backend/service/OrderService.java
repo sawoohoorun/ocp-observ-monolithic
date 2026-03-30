@@ -8,6 +8,7 @@ import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Scope;
 import java.util.Map;
 import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,6 +18,7 @@ public class OrderService {
   private final Tracer tracer;
   private final OrderRepository orderRepository;
 
+  @Autowired
   public OrderService(Tracer tracer, OrderRepository orderRepository) {
     this.tracer = tracer;
     this.orderRepository = orderRepository;
